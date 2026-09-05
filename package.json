@@ -11,7 +11,11 @@
     "typecheck": "bunx tsc --noEmit"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "bun-plugin-tailwind": "^0.1.2",
+    "tailwindcss": "^4.3.3"
   },
   "peerDependencies": {
     "typescript": "^5"
@@ -20,6 +24,9 @@
     "@libsql/client": "^0.18.0",
     "@signumjs/core": "^3.3.4",
     "@signumjs/util": "^3.3.4",
+    "framer-motion": "^13.2.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
     "signum-chain-walker": "^1.0.8"
   }
 }
