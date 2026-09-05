@@ -1,0 +1,16 @@
+{
+  "name": "signum-testnet-rewards",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "signum-chain-walker": "^1.0.8"
+  }
+}
