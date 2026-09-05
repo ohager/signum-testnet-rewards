@@ -80,7 +80,7 @@ describe("ChainWalker integration", () => {
       .query("SELECT COUNT(*) AS c FROM block_rewards WHERE block_id = ?1")
       .get(`block-${TIP}`) as { c: number };
     expect(tip.c).toBe(1);
-  });
+  }, 20_000);
 
   test("RESTART SAFETY: walking again from scratch adds nothing", async () => {
     // A fresh cache file forces a full re-walk, simulating the worst case where
@@ -90,5 +90,5 @@ describe("ChainWalker integration", () => {
     await walkOnce(join(dir, "cache-b.json"));
     const second = db.query("SELECT COUNT(*) AS c FROM block_rewards").get() as { c: number };
     expect(second.c).toBe(first.c);
-  });
-}, 20_000);
+  }, 20_000);
+});
