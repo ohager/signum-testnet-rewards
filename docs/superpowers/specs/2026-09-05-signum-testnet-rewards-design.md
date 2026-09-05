@@ -29,6 +29,10 @@ Reward Signum **testnet** miners with real **mainnet** SIGNA, automatically and 
 | D6 | Alerts fan out to status page + Telegram + Discord + email (Resend) | Operator wants push notification; community benefits from the public signal |
 | D7 | LAN-only `Bun.serve` admin UI with operator controls | Controls must live on the Pi; the cloud read-model stays strictly one-way |
 | D8 | Single process, one pm2 app, with an **outbox state machine** for payouts | Crash-safe payouts where it matters, without event-sourcing the whole system |
+| D9 | Money amounts use `Amount` from `@signumjs/util`; SQLite stores whole planck | Removes planck-vs-SIGNA ambiguity from every signature while keeping SQL `SUM()` exact |
+| D10 | Repo relicensed MIT → GPL-3.0-or-later | Enables reuse of signum-node's GPL design system in both UIs |
+| D11 | Money config declared in **SIGNA**, not planck | `Amount.fromSigna` parses decimals exactly, and a misplaced zero in a planck literal is the likelier operator error |
+| D12 | Turso publishing is **optional** | Absent config disables publishing instead of refusing to boot, so the indexer can be run and verified without a cloud database |
 
 ### Rejected alternatives
 
@@ -401,31 +405,34 @@ All money-related settings are **required with no defaults**, validated against 
 Example `config/.env.example` values (operator must set real ones):
 
 ```
-# --- money: required, no defaults ---
-REWARD_PER_BLOCK_PLANCK=25000000              # 0.25 SIGNA
-ACCOUNT_DAILY_CAP_PLANCK=200000000            # 2 SIGNA
-GLOBAL_DAILY_BUDGET_PLANCK=5000000000         # 50 SIGNA
-MIN_PAYOUT_PLANCK=50000000                    # 0.5 SIGNA dust threshold
-MAX_PER_RECIPIENT_PER_BATCH_PLANCK=1000000000 # 10 SIGNA
-MAX_PER_BATCH_PLANCK=10000000000              # 100 SIGNA
-MAX_PER_WALLCLOCK_DAY_PLANCK=10000000000      # 100 SIGNA
-MIN_WALLET_BALANCE_PLANCK=50000000000         # 500 SIGNA
-MAX_FEE_PLANCK=100000000                      # 1 SIGNA
+# Money settings are declared in SIGNA, not planck. All are REQUIRED with no
+# defaults: the service refuses to start rather than pay a guessed amount.
+# Agreed parameters: ~900 SIGNA/day at Signum's ~360 blocks/day.
+REWARD_PER_BLOCK_SIGNA=2.5
+ACCOUNT_DAILY_CAP_SIGNA=100
+GLOBAL_DAILY_BUDGET_SIGNA=1000
+MIN_PAYOUT_SIGNA=5
+MAX_PER_RECIPIENT_PER_BATCH_SIGNA=200
+MAX_PER_BATCH_SIGNA=2000
+MAX_PER_WALLCLOCK_DAY_SIGNA=3000
+MIN_WALLET_BALANCE_SIGNA=5000
+MAX_FEE_SIGNA=1
 
 # --- chain ---
 TESTNET_NODE_HOST=http://localhost:6876
 TESTNET_WS_URL=ws://localhost:6877/events
-MAINNET_NODE_HOSTS=<node-1>,<node-2>            # 2+ public mainnet nodes, comma separated
-START_HEIGHT=<set at first launch>
+MAINNET_NODE_HOSTS=CHANGE_ME_NODE_1,CHANGE_ME_NODE_2
+START_HEIGHT=0
 BLOCK_OFFSET=2
 WALKER_INTERVAL_SECONDS=5
 
-# --- payouts ---
+# --- payouts (Phase 2; keep false during shadow mode) ---
 PAYOUTS_ENABLED=false
 PAYOUT_INTERVAL_MINUTES=360
 TX_DEADLINE_MINUTES=30
 CONFIRMATIONS_REQUIRED=3
-PAYOUT_ACCOUNT_SEED=<never committed>
+# PAYOUT_ACCOUNT_SEED must NEVER be committed. chmod 600 the real .env.
+PAYOUT_ACCOUNT_SEED=
 
 # --- health ---
 STALL_THRESHOLD_MINUTES=15
@@ -434,7 +441,7 @@ SYNC_LAG_BLOCKS=5
 ALERT_OPEN_AFTER_CHECKS=3
 ALERT_CLOSE_AFTER_CHECKS=3
 
-# --- publishing ---
+# --- publishing: optional. Leave both blank to run without Turso. ---
 TURSO_DATABASE_URL=
 TURSO_AUTH_TOKEN=
 PUBLISH_INTERVAL_SECONDS=30
@@ -442,18 +449,18 @@ STALENESS_THRESHOLD_SECONDS=180
 MAINNET_ACCOUNT_TTL_POSITIVE_SECONDS=86400
 MAINNET_ACCOUNT_TTL_NEGATIVE_SECONDS=3600
 
-# --- storage ---
+# --- storage: must be on the HDD, and the sentinel must exist ---
 DATA_DIR=/mnt/hdd/signum-rewards
 
-# --- notifications (each channel active only if configured) ---
+# --- notifications: each channel activates only if fully configured ---
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 DISCORD_WEBHOOK_URL=
 RESEND_API_KEY=
 ALERT_EMAIL_TO=
 
-# --- admin ---
-ADMIN_BIND_HOST=192.168.1.50                   # the LAN interface, NOT 0.0.0.0
+# --- admin: bind to the LAN interface, NOT 0.0.0.0 ---
+ADMIN_BIND_HOST=192.168.1.50
 ADMIN_PORT=3100
 ADMIN_TOKEN=
 ```
@@ -486,7 +493,7 @@ These are values the operator supplies, not unresolved design questions. The des
 
 | Input | Needed by | Notes |
 |---|---|---|
-| Reward per block and all cap/rail values | End of shadow mode | Shadow mode produces the block-rate data needed to choose them sensibly |
+| Reward per block and all cap/rail values | ~~End of shadow mode~~ **Settled**: 2.5 SIGNA/block, 100/account/day, 1000/day global | Derived from a ~900 SIGNA/day target at ~360 blocks/day, so the global budget is a backstop rather than a mid-day cliff |
 | `START_HEIGHT` | First launch | Defines the beginning of the reward programme |
 | Mainnet node host list | First launch | Two or more public nodes for failover |
 | Payout account seed and initial float | Stage 2 of rollout | Small float first |

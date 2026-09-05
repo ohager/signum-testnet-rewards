@@ -1,7 +1,8 @@
 {
   "compilerOptions": {
     // Environment setup & latest features
-    "lib": ["ESNext"],
+    // DOM is needed for the admin UI (src/admin/app.tsx, src/ui/components)
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",

@@ -1,0 +1,154 @@
+import { loadConfig, resolvePaths } from "./config/load.ts";
+import { openLedger } from "./ledger/db.ts";
+import { createMainnetPool } from "./chain/mainnetPool.ts";
+import { createTestnetClient } from "./chain/testnetClient.ts";
+import { getFreshAccount, upsertAccount } from "./ledger/mainnetAccounts.ts";
+import type { MainnetAccountFacts } from "./eligibility/eligibility.ts";
+import { createIndexer } from "./indexer/indexer.ts";
+import { createWsMonitor } from "./health/wsMonitor.ts";
+import { createHttpProbe } from "./health/httpProbe.ts";
+import { createHealthMonitor } from "./health/monitor.ts";
+import { createNotifier } from "./notify/notifier.ts";
+import { createTelegramChannel } from "./notify/telegram.ts";
+import { createDiscordChannel } from "./notify/discord.ts";
+import { createEmailChannel } from "./notify/email.ts";
+import type { Channel } from "./notify/channel.ts";
+import { buildProjection } from "./publish/projection.ts";
+import { createTursoPublisher } from "./publish/tursoPublisher.ts";
+import { createAdminServer } from "./admin/server.ts";
+import { toChainDay } from "./domain/chainDay.ts";
+import { ChainTime } from "@signumjs/util";
+import { pruneHealthSamples } from "./ledger/healthSamples.ts";
+
+// Config validation runs FIRST and throws before anything opens a database.
+// The volume sentinel check lives inside loadConfig for exactly this reason.
+const config = loadConfig();
+const paths = resolvePaths(config);
+const db = openLedger(paths.databasePath);
+
+console.log(`[boot] data dir ${config.dataDir}`);
+console.log(`[boot] payouts ${config.payouts.enabled ? "ENABLED" : "DISABLED (shadow mode)"}`);
+console.log(`[boot] reward ${config.policy.rewardPerBlock.getSigna()} SIGNA/block, `
+  + `cap ${config.policy.accountDailyCap.getSigna()}/account/day, `
+  + `budget ${config.policy.globalDailyBudget.getSigna()}/day`);
+
+const mainnet = createMainnetPool(config.chain.mainnetNodeHosts);
+const testnet = createTestnetClient(config.chain.testnetNodeHost);
+
+/** Cached mainnet lookup. Negative results expire sooner so activation takes effect quickly. */
+async function lookupMainnetAccount(accountId: string): Promise<MainnetAccountFacts | undefined> {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const cached = getFreshAccount(
+    db,
+    accountId,
+    {
+      positiveSeconds: config.publish.accountTtlPositiveSeconds,
+      negativeSeconds: config.publish.accountTtlNegativeSeconds,
+    },
+    nowSeconds,
+  );
+  if (cached) return { isActive: cached.isActive, publicKey: cached.publicKey };
+
+  const account = await mainnet.getAccount(accountId);
+  const facts = {
+    accountId,
+    publicKey: account?.publicKey ?? null,
+    isActive: Boolean(account?.publicKey),
+  };
+  upsertAccount(db, facts, nowSeconds);
+  return { isActive: facts.isActive, publicKey: facts.publicKey };
+}
+
+const channels: Channel[] = [];
+if (config.notify.telegram) channels.push(createTelegramChannel(config.notify.telegram));
+if (config.notify.discord) channels.push(createDiscordChannel(config.notify.discord));
+if (config.notify.email) channels.push(createEmailChannel(config.notify.email));
+console.log(`[boot] notification channels: ${channels.map((c) => c.name).join(", ") || "none"}`);
+
+const notifier = createNotifier({ db, channels });
+const wsMonitor = createWsMonitor(config.chain.testnetWsUrl);
+const healthMonitor = createHealthMonitor({
+  db,
+  config,
+  wsMonitor,
+  probe: createHttpProbe(testnet),
+  intervalMs: 60_000,
+});
+
+// Publishing is optional: without Turso configured the service still indexes,
+// accrues and alerts, so the indexer can be run and verified on its own.
+const publisher = config.publish.turso
+  ? createTursoPublisher({
+      url: config.publish.turso.databaseUrl,
+      authToken: config.publish.turso.authToken,
+    })
+  : undefined;
+console.log(`[boot] turso publishing: ${publisher ? "enabled" : "disabled (not configured)"}`);
+
+const indexer = createIndexer({
+  db,
+  config,
+  walkerCachePath: paths.walkerCachePath,
+  lookupMainnetAccount,
+  isExcluded: () => false,
+  onBlockObserved: () => {},
+});
+
+const adminServer = createAdminServer({
+  db,
+  token: config.admin.token,
+  host: config.admin.bindHost,
+  port: config.admin.port,
+  minPayout: config.minPayout,
+  rails: config.rails,
+  globalDailyBudget: config.policy.globalDailyBudget,
+  getHealth: () => healthMonitor.getLatest(),
+});
+console.log(`[boot] admin UI on ${adminServer.url}`);
+
+async function publishTick() {
+  if (!publisher) return;
+  try {
+    await publisher.publish(
+      buildProjection(db, {
+        nowEpochSeconds: Math.floor(Date.now() / 1000),
+        chainDay: toChainDay(ChainTime.fromDate(new Date()).getChainTimestamp()),
+        recentPayoutLimit: 20,
+        globalDailyBudget: config.policy.globalDailyBudget,
+      }),
+    );
+  } catch (e) {
+    // Best-effort: the next tick republishes from live state, so a failure needs
+    // no queue and must never stop indexing.
+    console.error("[publish] failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+healthMonitor.start();
+const publishTimer = setInterval(() => void publishTick(), config.publish.intervalSeconds * 1000);
+const notifyTimer = setInterval(() => void notifier.flush(), 30_000);
+const pruneTimer = setInterval(
+  () => pruneHealthSamples(db, Math.floor(Date.now() / 1000) - 30 * 86_400),
+  6 * 3_600_000,
+);
+
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal}`);
+  clearInterval(publishTimer);
+  clearInterval(notifyTimer);
+  clearInterval(pruneTimer);
+  healthMonitor.stop();
+  adminServer.stop();
+  await indexer.stop();
+  publisher?.close();
+  db.close();
+  process.exit(0);
+}
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+// Runs until stopped. walk() catches up, then listen() takes over.
+await indexer.run();
