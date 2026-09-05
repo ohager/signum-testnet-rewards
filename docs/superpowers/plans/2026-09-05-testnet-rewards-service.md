@@ -35,7 +35,7 @@ Confirmed by reading the installed packages and `signum-node` source — do not 
 - `signum-node/src/brs/Constants.java`: `MAX_MULTI_OUT_RECIPIENTS = 64`.
 - `signum-node/src/brs/Attachment.java`: rejects `recipients.size() <= 1` — single-recipient batches cannot use multi-out.
 - SIP-50 WebSocket: `ws://<host>:<httpPort + 1>/events`; events `CONNECTED`, `HEARTBEAT` (~30s), `BLOCK_PUSHED`, `PENDING_TRANSACTIONS_ADDED`; envelope is `{ e: "EVENT_NAME", p: {...} }`.
-- `Amount` (verified by running it): `add`/`subtract`/`multiply`/`divide` mutate the receiver and return `this`; `clone()` is the only safe way to accumulate. `getPlanck()` returns a string, `getSigna()` returns a string, `fromPlanck()` accepts number or string, `fromSigna()` accepts a decimal string. `toString()` renders like `Ꞩ 1,234.5`.
+- `Amount` (verified by running it): `add`/`subtract`/`multiply`/`divide` mutate the receiver and return `this`; `clone()` is the only safe way to accumulate. `getPlanck()` returns a string, `getSigna()` returns a string, `fromPlanck()` accepts number or string, `fromSigna()` accepts a decimal string. `fromSigna` SILENTLY ROUNDS input finer than a planck (`0.123456789` -> 12345679 planck) and `fromPlanck('1.5')` -> 2, so getPlanck() is always an integer string. `toString()` renders like `Ꞩ 1,234.5`.
 
 ---
 
@@ -853,9 +853,12 @@ describe("parseConfig", () => {
   });
 
   test("rejects a SIGNA value with sub-planck precision", () => {
+    // Amount.fromSigna SILENTLY ROUNDS 9 decimals to 8 (verified in Task 1), so
+    // validation must count decimal places on the raw string. Relying on Amount
+    // to complain would let a mistyped reward through, rounded.
     const env = validEnv();
     env.REWARD_PER_BLOCK_SIGNA = "0.123456789"; // 9 decimals
-    expect(() => parseConfig(env)).toThrow(/planck/i);
+    expect(() => parseConfig(env)).toThrow(/decimal/i);
   });
 
   test("rejects a non-numeric SIGNA value", () => {
@@ -1035,8 +1038,18 @@ export function parseConfig(env: Env): AppConfig {
       return Amount.Zero();
     }
     const text = raw.trim();
-    if (!/^\d+(\.\d+)?$/.test(text)) {
+    const match = /^(\d+)(?:\.(\d+))?$/.exec(text);
+    if (!match) {
       problems.push(`${key} must be a positive decimal number of SIGNA, got "${raw}"`);
+      return Amount.Zero();
+    }
+    // Amount.fromSigna silently rounds anything finer than a planck, so the
+    // decimal count is checked here rather than left to the library.
+    const decimals = match[2]?.length ?? 0;
+    if (decimals > 8) {
+      problems.push(
+        `${key} has ${decimals} decimal places; SIGNA has at most 8 (1 planck), got "${raw}"`,
+      );
       return Amount.Zero();
     }
     const amount = Amount.fromSigna(text);
@@ -1044,7 +1057,7 @@ export function parseConfig(env: Env): AppConfig {
       toPlanckInt(amount);
     } catch (e) {
       if (e instanceof MoneyError) {
-        problems.push(`${key} must resolve to a whole number of planck (max 8 decimals), got "${raw}"`);
+        problems.push(`${key} is too large to represent exactly, got "${raw}"`);
         return Amount.Zero();
       }
       throw e;

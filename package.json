@@ -4,6 +4,12 @@
   "type": "module",
   "private": true,
   "license": "GPL-3.0-or-later",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "dev": "bun --hot src/main.ts",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  },
   "devDependencies": {
     "@types/bun": "latest"
   },
@@ -11,6 +17,9 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "@signumjs/core": "^3.3.4",
+    "@signumjs/util": "^3.3.4",
     "signum-chain-walker": "^1.0.8"
   }
 }
