@@ -3820,3 +3820,2602 @@ git commit -m "feat: add batch composition and non-mutating dry-run"
 
 ---
 
+
+## Task 15: Health state machine (pure)
+
+The whole point of this module is to keep "our observer is broken" distinguishable from "the testnet is stuck". Conflating them is the false alarm that trains an operator to ignore alerts.
+
+**Files:**
+- Create: `src/health/healthState.ts`
+- Test: `tests/health/healthState.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/health/healthState.test.ts`:
+
+```ts
+import { test, expect, describe } from "bun:test";
+import { assessHealth } from "../../src/health/healthState.ts";
+import type { HealthInputs, HealthThresholds } from "../../src/health/healthState.ts";
+
+const NOW = 1_800_000_000_000;
+const MIN = 60_000;
+
+const thresholds: HealthThresholds = {
+  heartbeatTimeoutMs: 90_000, // ~3 missed 30s heartbeats
+  stallThresholdMs: 15 * MIN,
+  syncLagBlocks: 5,
+  minPeers: 3,
+};
+
+const healthy: HealthInputs = {
+  nowMs: NOW,
+  lastHeartbeatAtMs: NOW - 10_000,
+  lastBlockAtMs: NOW - 2 * MIN,
+  httpReachable: true,
+  localHeight: 1000,
+  globalHeight: 1000,
+  peerCount: 8,
+};
+
+const kinds = (i: HealthInputs) => assessHealth(i, thresholds).conditions.map((c) => c.kind);
+
+describe("assessHealth", () => {
+  test("reports ok when everything is healthy", () => {
+    const result = assessHealth(healthy, thresholds);
+    expect(result.overall).toBe("ok");
+    expect(result.conditions).toHaveLength(0);
+  });
+
+  test("CRITICAL: heartbeat gone and HTTP unreachable means our side is broken", () => {
+    const result = assessHealth(
+      { ...healthy, lastHeartbeatAtMs: NOW - 5 * MIN, httpReachable: false },
+      thresholds,
+    );
+    expect(result.overall).toBe("critical");
+    expect(result.conditions.map((c) => c.kind)).toContain("node_unreachable");
+  });
+
+  test("CRITICAL: no blocks past the stall threshold means the testnet is stuck", () => {
+    const result = assessHealth({ ...healthy, lastBlockAtMs: NOW - 20 * MIN }, thresholds);
+    expect(result.overall).toBe("critical");
+    expect(result.conditions.map((c) => c.kind)).toContain("testnet_stalled");
+  });
+
+  test("THE KEY CASE: dead socket but HTTP fine and blocks advancing is only a warning", () => {
+    // Without the HTTP fallback this would be indistinguishable from a stall.
+    const result = assessHealth(
+      { ...healthy, lastHeartbeatAtMs: NOW - 5 * MIN, httpReachable: true },
+      thresholds,
+    );
+    expect(result.overall).toBe("warning");
+    expect(result.conditions.map((c) => c.kind)).toContain("ws_degraded");
+    expect(result.conditions.map((c) => c.kind)).not.toContain("testnet_stalled");
+  });
+
+  test("a dead socket does not suppress a genuine stall detected over HTTP", () => {
+    const result = assessHealth(
+      {
+        ...healthy,
+        lastHeartbeatAtMs: NOW - 5 * MIN,
+        httpReachable: true,
+        lastBlockAtMs: NOW - 20 * MIN,
+      },
+      thresholds,
+    );
+    expect(result.conditions.map((c) => c.kind)).toContain("testnet_stalled");
+    expect(result.overall).toBe("critical");
+  });
+
+  test("warns when the local node lags the network", () => {
+    expect(kinds({ ...healthy, localHeight: 990, globalHeight: 1000 })).toContain(
+      "node_out_of_sync",
+    );
+  });
+
+  test("does not warn for a lag within tolerance", () => {
+    expect(kinds({ ...healthy, localHeight: 997, globalHeight: 1000 })).not.toContain(
+      "node_out_of_sync",
+    );
+  });
+
+  test("warns on low peer count", () => {
+    expect(kinds({ ...healthy, peerCount: 1 })).toContain("low_peers");
+  });
+
+  test("STARTUP: unknown block time is not treated as a stall", () => {
+    // On a cold start we have not seen a block yet. Claiming the chain is stuck
+    // would fire a critical alert every single restart.
+    const result = assessHealth({ ...healthy, lastBlockAtMs: undefined }, thresholds);
+    expect(result.conditions.map((c) => c.kind)).not.toContain("testnet_stalled");
+  });
+
+  test("STARTUP: unknown heights and peer count raise nothing", () => {
+    const result = assessHealth(
+      {
+        nowMs: NOW,
+        lastHeartbeatAtMs: NOW - 1000,
+        lastBlockAtMs: undefined,
+        httpReachable: true,
+        localHeight: undefined,
+        globalHeight: undefined,
+        peerCount: undefined,
+      },
+      thresholds,
+    );
+    expect(result.overall).toBe("ok");
+  });
+
+  test("reports several simultaneous conditions, escalating to the worst", () => {
+    const result = assessHealth(
+      { ...healthy, peerCount: 1, lastBlockAtMs: NOW - 20 * MIN },
+      thresholds,
+    );
+    expect(result.conditions.map((c) => c.kind).sort()).toEqual(["low_peers", "testnet_stalled"]);
+    expect(result.overall).toBe("critical");
+  });
+});
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `bun test tests/health/healthState.test.ts`
+Expected: FAIL — `Cannot find module '../../src/health/healthState.ts'`
+
+- [ ] **Step 3: Implement**
+
+Create `src/health/healthState.ts`:
+
+```ts
+import type { Severity } from "../ledger/alerts.ts";
+
+export type HealthAlertKind =
+  | "node_unreachable"
+  | "testnet_stalled"
+  | "ws_degraded"
+  | "node_out_of_sync"
+  | "low_peers";
+
+export interface HealthInputs {
+  nowMs: number;
+  /** Last SIP-50 HEARTBEAT. undefined means we have never had one. */
+  lastHeartbeatAtMs: number | undefined;
+  /** Last observed new block, from either WS BLOCK_PUSHED or an HTTP height increase. */
+  lastBlockAtMs: number | undefined;
+  /** Whether the most recent HTTP probe of the testnet node succeeded. */
+  httpReachable: boolean;
+  localHeight: number | undefined;
+  globalHeight: number | undefined;
+  peerCount: number | undefined;
+}
+
+export interface HealthThresholds {
+  heartbeatTimeoutMs: number;
+  stallThresholdMs: number;
+  syncLagBlocks: number;
+  minPeers: number;
+}
+
+export interface HealthCondition {
+  kind: HealthAlertKind;
+  severity: Severity;
+  message: string;
+}
+
+export interface HealthAssessment {
+  overall: "ok" | "warning" | "critical";
+  conditions: HealthCondition[];
+  wsAlive: boolean;
+}
+
+/**
+ * Turns raw observations into a set of active conditions.
+ *
+ * The design rule: never infer a chain problem from an observer problem. A dead
+ * WebSocket alone is `ws_degraded`, a warning, because the HTTP fallback still
+ * tells us whether blocks are advancing. Only when BOTH transports are silent do
+ * we say the node is unreachable, and `testnet_stalled` is raised strictly from
+ * block timing, whichever transport supplied it.
+ *
+ * Unknown inputs raise nothing. On a cold start we have not seen a block yet,
+ * and treating that as a stall would fire a critical alert on every restart.
+ */
+export function assessHealth(
+  inputs: HealthInputs,
+  thresholds: HealthThresholds,
+): HealthAssessment {
+  const conditions: HealthCondition[] = [];
+
+  const wsAlive =
+    inputs.lastHeartbeatAtMs !== undefined &&
+    inputs.nowMs - inputs.lastHeartbeatAtMs <= thresholds.heartbeatTimeoutMs;
+
+  if (!wsAlive && !inputs.httpReachable) {
+    conditions.push({
+      kind: "node_unreachable",
+      severity: "critical",
+      message: "Testnet node is unreachable over both WebSocket and HTTP",
+    });
+  } else if (!wsAlive) {
+    conditions.push({
+      kind: "ws_degraded",
+      severity: "warning",
+      message: "SIP-50 heartbeat lost; falling back to HTTP polling. Chain status still known.",
+    });
+  }
+
+  if (inputs.lastBlockAtMs !== undefined) {
+    const sinceBlockMs = inputs.nowMs - inputs.lastBlockAtMs;
+    if (sinceBlockMs > thresholds.stallThresholdMs) {
+      conditions.push({
+        kind: "testnet_stalled",
+        severity: "critical",
+        message: `No new block for ${Math.floor(sinceBlockMs / 60_000)} minutes`,
+      });
+    }
+  }
+
+  if (inputs.localHeight !== undefined && inputs.globalHeight !== undefined) {
+    const lag = inputs.globalHeight - inputs.localHeight;
+    if (lag > thresholds.syncLagBlocks) {
+      conditions.push({
+        kind: "node_out_of_sync",
+        severity: "warning",
+        message: `Local node is ${lag} blocks behind the network`,
+      });
+    }
+  }
+
+  if (inputs.peerCount !== undefined && inputs.peerCount < thresholds.minPeers) {
+    conditions.push({
+      kind: "low_peers",
+      severity: "warning",
+      message: `Only ${inputs.peerCount} peers connected (minimum ${thresholds.minPeers})`,
+    });
+  }
+
+  const overall = conditions.some((c) => c.severity === "critical")
+    ? "critical"
+    : conditions.length > 0
+      ? "warning"
+      : "ok";
+
+  return { overall, conditions, wsAlive };
+}
+```
+
+- [ ] **Step 4: Run it to verify it passes**
+
+Run: `bun test tests/health/healthState.test.ts`
+Expected: `11 pass, 0 fail`
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add src/health/healthState.ts tests/health/healthState.test.ts
+git commit -m "feat: add health state machine distinguishing observer from chain failure"
+```
+
+---
+
+## Task 16: SIP-50 WebSocket event reduction and the socket client
+
+The event-folding logic is pure and tested; the socket itself is a thin wrapper verified in shadow mode. That split keeps reconnect plumbing out of the tests without leaving the interesting logic untested.
+
+**Files:**
+- Create: `src/health/wsEvents.ts`
+- Create: `src/health/wsMonitor.ts`
+- Test: `tests/health/wsEvents.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/health/wsEvents.test.ts`:
+
+```ts
+import { test, expect, describe } from "bun:test";
+import { initialWsState, reduceWsEvent, parseWsMessage } from "../../src/health/wsEvents.ts";
+
+const NOW = 1_800_000_000_000;
+
+describe("parseWsMessage", () => {
+  test("parses a well-formed SIP-50 envelope", () => {
+    expect(parseWsMessage('{"e":"HEARTBEAT"}')).toEqual({ e: "HEARTBEAT", p: undefined });
+  });
+
+  test("parses an envelope with a payload", () => {
+    const msg = parseWsMessage('{"e":"BLOCK_PUSHED","p":{"height":1234}}');
+    expect(msg?.e).toBe("BLOCK_PUSHED");
+    expect(msg?.p).toEqual({ height: 1234 });
+  });
+
+  test("returns undefined for malformed JSON rather than throwing", () => {
+    // A node sending garbage must not crash the health monitor.
+    expect(parseWsMessage("not json")).toBeUndefined();
+  });
+
+  test("returns undefined when the event field is missing", () => {
+    expect(parseWsMessage('{"p":{"height":1}}')).toBeUndefined();
+  });
+
+  test("ignores an unknown event type", () => {
+    expect(parseWsMessage('{"e":"SOMETHING_NEW"}')).toBeUndefined();
+  });
+});
+
+describe("reduceWsEvent", () => {
+  test("HEARTBEAT records liveness without touching block state", () => {
+    const state = reduceWsEvent(initialWsState(), { e: "HEARTBEAT" }, NOW);
+    expect(state.lastHeartbeatAtMs).toBe(NOW);
+    expect(state.lastBlockAtMs).toBeUndefined();
+  });
+
+  test("BLOCK_PUSHED records both a block and liveness", () => {
+    // A block arriving is itself proof the socket is alive.
+    const state = reduceWsEvent(initialWsState(), { e: "BLOCK_PUSHED", p: { height: 500 } }, NOW);
+    expect(state.lastBlockAtMs).toBe(NOW);
+    expect(state.lastHeartbeatAtMs).toBe(NOW);
+    expect(state.localHeight).toBe(500);
+  });
+
+  test("CONNECTED records both heights for the sync-lag check", () => {
+    const state = reduceWsEvent(
+      initialWsState(),
+      { e: "CONNECTED", p: { localHeight: 990, globalHeight: 1000 } },
+      NOW,
+    );
+    expect(state.localHeight).toBe(990);
+    expect(state.globalHeight).toBe(1000);
+    expect(state.lastHeartbeatAtMs).toBe(NOW);
+  });
+
+  test("a BLOCK_PUSHED without a usable height still records the timing", () => {
+    const state = reduceWsEvent(initialWsState(), { e: "BLOCK_PUSHED", p: {} }, NOW);
+    expect(state.lastBlockAtMs).toBe(NOW);
+    expect(state.localHeight).toBeUndefined();
+  });
+
+  test("PENDING_TRANSACTIONS_ADDED counts as liveness but not as a block", () => {
+    const state = reduceWsEvent(initialWsState(), { e: "PENDING_TRANSACTIONS_ADDED" }, NOW);
+    expect(state.lastHeartbeatAtMs).toBe(NOW);
+    expect(state.lastBlockAtMs).toBeUndefined();
+  });
+
+  test("PURITY: reducing returns a new state and leaves the old one untouched", () => {
+    const before = initialWsState();
+    const after = reduceWsEvent(before, { e: "HEARTBEAT" }, NOW);
+    expect(before.lastHeartbeatAtMs).toBeUndefined();
+    expect(after).not.toBe(before);
+  });
+});
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `bun test tests/health/wsEvents.test.ts`
+Expected: FAIL — `Cannot find module '../../src/health/wsEvents.ts'`
+
+- [ ] **Step 3: Implement the pure reducer**
+
+Create `src/health/wsEvents.ts`:
+
+```ts
+/**
+ * SIP-50 event handling.
+ *
+ * Envelope: { e: "EVENT_NAME", p?: {...} }
+ * Events:   CONNECTED, HEARTBEAT (~30s), BLOCK_PUSHED, PENDING_TRANSACTIONS_ADDED
+ *
+ * The spec limits this socket to reading public blockchain information, so it is
+ * used only for liveness here and never touches the payout path.
+ */
+export type WsEventName =
+  | "CONNECTED"
+  | "HEARTBEAT"
+  | "BLOCK_PUSHED"
+  | "PENDING_TRANSACTIONS_ADDED";
+
+const KNOWN_EVENTS: readonly WsEventName[] = [
+  "CONNECTED",
+  "HEARTBEAT",
+  "BLOCK_PUSHED",
+  "PENDING_TRANSACTIONS_ADDED",
+];
+
+export interface WsMessage {
+  e: WsEventName;
+  p?: Record<string, unknown>;
+}
+
+export interface WsState {
+  lastHeartbeatAtMs: number | undefined;
+  lastBlockAtMs: number | undefined;
+  localHeight: number | undefined;
+  globalHeight: number | undefined;
+}
+
+export function initialWsState(): WsState {
+  return {
+    lastHeartbeatAtMs: undefined,
+    lastBlockAtMs: undefined,
+    localHeight: undefined,
+    globalHeight: undefined,
+  };
+}
+
+/** Tolerant parse: a node sending garbage must never crash the health monitor. */
+export function parseWsMessage(raw: string): WsMessage | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  const e = (parsed as { e?: unknown }).e;
+  if (typeof e !== "string" || !KNOWN_EVENTS.includes(e as WsEventName)) return undefined;
+  const p = (parsed as { p?: unknown }).p;
+  return {
+    e: e as WsEventName,
+    p: typeof p === "object" && p !== null ? (p as Record<string, unknown>) : undefined,
+  };
+}
+
+const num = (v: unknown): number | undefined => (typeof v === "number" ? v : undefined);
+
+/**
+ * Folds one event into the liveness state.
+ *
+ * Every event refreshes the heartbeat timestamp, not just HEARTBEAT itself: any
+ * message arriving is proof the socket is alive, and a busy node may debounce
+ * heartbeats behind other traffic.
+ */
+export function reduceWsEvent(state: WsState, msg: WsMessage, nowMs: number): WsState {
+  const next: WsState = { ...state, lastHeartbeatAtMs: nowMs };
+
+  if (msg.e === "BLOCK_PUSHED") {
+    next.lastBlockAtMs = nowMs;
+    const height = num(msg.p?.height) ?? num(msg.p?.localHeight);
+    if (height !== undefined) next.localHeight = height;
+    const global = num(msg.p?.globalHeight);
+    if (global !== undefined) next.globalHeight = global;
+  }
+
+  if (msg.e === "CONNECTED") {
+    const local = num(msg.p?.localHeight);
+    const global = num(msg.p?.globalHeight);
+    if (local !== undefined) next.localHeight = local;
+    if (global !== undefined) next.globalHeight = global;
+  }
+
+  return next;
+}
+```
+
+- [ ] **Step 4: Run it to verify it passes**
+
+Run: `bun test tests/health/wsEvents.test.ts`
+Expected: `12 pass, 0 fail`
+
+- [ ] **Step 5: Implement the socket wrapper**
+
+Create `src/health/wsMonitor.ts`:
+
+```ts
+import { initialWsState, parseWsMessage, reduceWsEvent } from "./wsEvents.ts";
+import type { WsState } from "./wsEvents.ts";
+
+export interface WsMonitor {
+  start: () => void;
+  stop: () => void;
+  getState: () => WsState;
+}
+
+/**
+ * Maintains a SIP-50 WebSocket connection and folds its events into liveness state.
+ *
+ * Reconnects with capped exponential backoff and never throws outward: the health
+ * monitor treats a dead socket as a signal (ws_degraded), not as an error, and the
+ * HTTP fallback covers the gap.
+ */
+export function createWsMonitor(url: string, now: () => number = Date.now): WsMonitor {
+  let state = initialWsState();
+  let socket: WebSocket | undefined;
+  let retryMs = 1_000;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let stopped = false;
+
+  const scheduleReconnect = () => {
+    if (stopped) return;
+    timer = setTimeout(connect, retryMs);
+    retryMs = Math.min(retryMs * 2, 60_000);
+  };
+
+  const connect = () => {
+    if (stopped) return;
+    try {
+      socket = new WebSocket(url);
+    } catch {
+      scheduleReconnect();
+      return;
+    }
+
+    socket.onopen = () => {
+      retryMs = 1_000;
+    };
+    socket.onmessage = (event: MessageEvent) => {
+      const raw = typeof event.data === "string" ? event.data : "";
+      const msg = parseWsMessage(raw);
+      if (msg) state = reduceWsEvent(state, msg, now());
+    };
+    socket.onclose = () => scheduleReconnect();
+    socket.onerror = () => socket?.close();
+  };
+
+  return {
+    start() {
+      stopped = false;
+      connect();
+    },
+    stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      socket?.close();
+    },
+    getState: () => state,
+  };
+}
+```
+
+- [ ] **Step 6: Typecheck and commit**
+
+```bash
+bunx tsc --noEmit
+git add src/health/wsEvents.ts src/health/wsMonitor.ts tests/health/wsEvents.test.ts
+git commit -m "feat: add SIP-50 event reduction and reconnecting websocket monitor"
+```
+
+---
+
+## Task 17: Alert hysteresis and the health monitor loop
+
+**Files:**
+- Create: `src/health/hysteresis.ts`
+- Create: `src/health/httpProbe.ts`
+- Create: `src/health/monitor.ts`
+- Test: `tests/health/hysteresis.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/health/hysteresis.test.ts`:
+
+```ts
+import { test, expect, describe } from "bun:test";
+import { emptyCounters, applyHysteresis } from "../../src/health/hysteresis.ts";
+import type { HealthCondition } from "../../src/health/healthState.ts";
+
+const opts = { openAfterChecks: 3, closeAfterChecks: 3 };
+
+const lowPeers: HealthCondition = {
+  kind: "low_peers",
+  severity: "warning",
+  message: "1 peer",
+};
+
+describe("applyHysteresis", () => {
+  test("does not open an alert on the first sighting", () => {
+    const result = applyHysteresis(emptyCounters(), [lowPeers], new Set(), opts);
+    expect(result.toOpen).toHaveLength(0);
+  });
+
+  test("opens only after the condition holds for the required number of checks", () => {
+    let counters = emptyCounters();
+    let opened: HealthCondition[] = [];
+    for (let i = 0; i < 3; i++) {
+      const result = applyHysteresis(counters, [lowPeers], new Set(), opts);
+      counters = result.counters;
+      opened = result.toOpen;
+    }
+    expect(opened.map((c) => c.kind)).toEqual(["low_peers"]);
+  });
+
+  test("FLAPPING: an intermittent condition never opens", () => {
+    // This is the scenario that would otherwise fill the operator's phone.
+    let counters = emptyCounters();
+    for (let i = 0; i < 20; i++) {
+      const present = i % 2 === 0 ? [lowPeers] : [];
+      const result = applyHysteresis(counters, present, new Set(), opts);
+      counters = result.counters;
+      expect(result.toOpen).toHaveLength(0);
+    }
+  });
+
+  test("does not re-open an alert that is already open", () => {
+    let counters = emptyCounters();
+    for (let i = 0; i < 5; i++) {
+      counters = applyHysteresis(counters, [lowPeers], new Set(["low_peers"]), opts).counters;
+    }
+    const result = applyHysteresis(counters, [lowPeers], new Set(["low_peers"]), opts);
+    expect(result.toOpen).toHaveLength(0);
+  });
+
+  test("resolves only after the condition has cleared for the required checks", () => {
+    let counters = emptyCounters();
+    const open = new Set(["low_peers"]);
+    let resolved: string[] = [];
+    for (let i = 0; i < 2; i++) {
+      const result = applyHysteresis(counters, [], open, opts);
+      counters = result.counters;
+      resolved = result.toResolve;
+      expect(resolved).toHaveLength(0);
+    }
+    const final = applyHysteresis(counters, [], open, opts);
+    expect(final.toResolve).toEqual(["low_peers"]);
+  });
+
+  test("does not resolve an alert that is not open", () => {
+    let counters = emptyCounters();
+    for (let i = 0; i < 5; i++) {
+      const result = applyHysteresis(counters, [], new Set(), opts);
+      counters = result.counters;
+      expect(result.toResolve).toHaveLength(0);
+    }
+  });
+
+  test("a reappearing condition resets the clear streak", () => {
+    let counters = emptyCounters();
+    const open = new Set(["low_peers"]);
+    counters = applyHysteresis(counters, [], open, opts).counters;
+    counters = applyHysteresis(counters, [], open, opts).counters;
+    counters = applyHysteresis(counters, [lowPeers], open, opts).counters; // reappears
+    const result = applyHysteresis(counters, [], open, opts);
+    expect(result.toResolve).toHaveLength(0);
+  });
+
+  test("PURITY: the input counters are not mutated", () => {
+    const before = emptyCounters();
+    applyHysteresis(before, [lowPeers], new Set(), opts);
+    expect(before.size).toBe(0);
+  });
+});
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `bun test tests/health/hysteresis.test.ts`
+Expected: FAIL — `Cannot find module '../../src/health/hysteresis.ts'`
+
+- [ ] **Step 3: Implement hysteresis**
+
+Create `src/health/hysteresis.ts`:
+
+```ts
+import type { HealthCondition, HealthAlertKind } from "./healthState.ts";
+
+export interface Streaks {
+  present: number;
+  absent: number;
+}
+
+export type HysteresisCounters = Map<string, Streaks>;
+
+export function emptyCounters(): HysteresisCounters {
+  return new Map();
+}
+
+export interface HysteresisOptions {
+  openAfterChecks: number;
+  closeAfterChecks: number;
+}
+
+export interface HysteresisResult {
+  toOpen: HealthCondition[];
+  toResolve: string[];
+  counters: HysteresisCounters;
+}
+
+/**
+ * Decides which alerts to open and resolve, requiring a condition to persist
+ * before acting on it.
+ *
+ * The database's partial unique index already prevents duplicate open incidents;
+ * this adds the second half of the protection by refusing to react to a
+ * condition that has not held for several consecutive checks. Together they mean
+ * a flapping signal produces no notifications at all rather than a stream.
+ */
+export function applyHysteresis(
+  counters: HysteresisCounters,
+  activeConditions: HealthCondition[],
+  openKinds: Set<string>,
+  opts: HysteresisOptions,
+): HysteresisResult {
+  const next: HysteresisCounters = new Map(counters);
+  const activeByKind = new Map<HealthAlertKind, HealthCondition>();
+  for (const c of activeConditions) activeByKind.set(c.kind, c);
+
+  const allKinds = new Set<string>([...next.keys(), ...activeByKind.keys(), ...openKinds]);
+  const toOpen: HealthCondition[] = [];
+  const toResolve: string[] = [];
+
+  for (const kind of allKinds) {
+    const previous = next.get(kind) ?? { present: 0, absent: 0 };
+    const condition = activeByKind.get(kind as HealthAlertKind);
+
+    if (condition) {
+      const streaks = { present: previous.present + 1, absent: 0 };
+      next.set(kind, streaks);
+      if (streaks.present >= opts.openAfterChecks && !openKinds.has(kind)) {
+        toOpen.push(condition);
+      }
+    } else {
+      const streaks = { present: 0, absent: previous.absent + 1 };
+      next.set(kind, streaks);
+      if (streaks.absent >= opts.closeAfterChecks && openKinds.has(kind)) {
+        toResolve.push(kind);
+      }
+    }
+  }
+
+  return { toOpen, toResolve, counters: next };
+}
+```
+
+- [ ] **Step 4: Run it to verify it passes**
+
+Run: `bun test tests/health/hysteresis.test.ts`
+Expected: `8 pass, 0 fail`
+
+- [ ] **Step 5: Implement the HTTP probe**
+
+Create `src/health/httpProbe.ts`:
+
+```ts
+import type { TestnetClient } from "../chain/testnetClient.ts";
+
+export interface ProbeResult {
+  httpReachable: boolean;
+  localHeight: number | undefined;
+  globalHeight: number | undefined;
+  peerCount: number | undefined;
+  /** Set when the height advanced since the previous probe. */
+  blockAdvancedAtMs: number | undefined;
+}
+
+/**
+ * Polls the testnet node over HTTP.
+ *
+ * This is what keeps `testnet_stalled` detectable when the SIP-50 socket is
+ * dead: by tracking height changes between probes it supplies the block timing
+ * the WebSocket would otherwise have provided.
+ */
+export function createHttpProbe(client: TestnetClient, now: () => number = Date.now) {
+  let lastSeenHeight: number | undefined;
+
+  return async function probe(): Promise<ProbeResult> {
+    try {
+      const snapshot = await client.getSnapshot();
+      let blockAdvancedAtMs: number | undefined;
+      if (lastSeenHeight !== undefined && snapshot.localHeight > lastSeenHeight) {
+        blockAdvancedAtMs = now();
+      }
+      lastSeenHeight = snapshot.localHeight;
+
+      let peerCount: number | undefined;
+      try {
+        peerCount = await client.getPeerCount();
+      } catch {
+        peerCount = undefined; // peers failing alone is not "node unreachable"
+      }
+
+      return {
+        httpReachable: true,
+        localHeight: snapshot.localHeight,
+        globalHeight: snapshot.globalHeight,
+        peerCount,
+        blockAdvancedAtMs,
+      };
+    } catch {
+      return {
+        httpReachable: false,
+        localHeight: undefined,
+        globalHeight: undefined,
+        peerCount: undefined,
+        blockAdvancedAtMs: undefined,
+      };
+    }
+  };
+}
+```
+
+- [ ] **Step 6: Implement the monitor loop**
+
+Create `src/health/monitor.ts`:
+
+```ts
+import type { Ledger } from "../ledger/db.ts";
+import type { AppConfig } from "../config/schema.ts";
+import type { WsMonitor } from "./wsMonitor.ts";
+import type { ProbeResult } from "./httpProbe.ts";
+import type { HealthAssessment } from "./healthState.ts";
+import { assessHealth } from "./healthState.ts";
+import { emptyCounters, applyHysteresis } from "./hysteresis.ts";
+import type { HysteresisCounters } from "./hysteresis.ts";
+import { openAlert, resolveAlert, listOpenAlerts } from "../ledger/alerts.ts";
+import { recordHealthSample } from "../ledger/healthSamples.ts";
+
+export interface HealthMonitorDeps {
+  db: Ledger;
+  config: AppConfig;
+  wsMonitor: WsMonitor;
+  probe: () => Promise<ProbeResult>;
+  intervalMs: number;
+  now?: () => number;
+}
+
+export interface HealthMonitor {
+  start: () => void;
+  stop: () => void;
+  getLatest: () => HealthAssessment | undefined;
+  /** Runs one cycle immediately. Exposed for the admin UI and for tests. */
+  tick: () => Promise<HealthAssessment>;
+}
+
+export function createHealthMonitor(deps: HealthMonitorDeps): HealthMonitor {
+  const now = deps.now ?? Date.now;
+  let counters: HysteresisCounters = emptyCounters();
+  let latest: HealthAssessment | undefined;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let lastBlockAtMs: number | undefined;
+
+  async function tick(): Promise<HealthAssessment> {
+    const probeResult = await deps.probe();
+    const wsState = deps.wsMonitor.getState();
+
+    // Either transport observing a new block counts as block progress.
+    if (wsState.lastBlockAtMs !== undefined) {
+      lastBlockAtMs = Math.max(lastBlockAtMs ?? 0, wsState.lastBlockAtMs);
+    }
+    if (probeResult.blockAdvancedAtMs !== undefined) {
+      lastBlockAtMs = Math.max(lastBlockAtMs ?? 0, probeResult.blockAdvancedAtMs);
+    }
+
+    const assessment = assessHealth(
+      {
+        nowMs: now(),
+        lastHeartbeatAtMs: wsState.lastHeartbeatAtMs,
+        lastBlockAtMs,
+        httpReachable: probeResult.httpReachable,
+        localHeight: probeResult.localHeight ?? wsState.localHeight,
+        globalHeight: probeResult.globalHeight ?? wsState.globalHeight,
+        peerCount: probeResult.peerCount,
+      },
+      {
+        heartbeatTimeoutMs: 90_000,
+        stallThresholdMs: deps.config.health.stallThresholdMinutes * 60_000,
+        syncLagBlocks: deps.config.health.syncLagBlocks,
+        minPeers: deps.config.health.minPeers,
+      },
+    );
+
+    latest = assessment;
+
+    const openKinds = new Set(listOpenAlerts(deps.db).map((a) => a.kind));
+    const decision = applyHysteresis(counters, assessment.conditions, openKinds, {
+      openAfterChecks: deps.config.health.alertOpenAfterChecks,
+      closeAfterChecks: deps.config.health.alertCloseAfterChecks,
+    });
+    counters = decision.counters;
+
+    for (const condition of decision.toOpen) {
+      openAlert(deps.db, {
+        kind: condition.kind,
+        severity: condition.severity,
+        message: condition.message,
+      });
+    }
+    for (const kind of decision.toResolve) {
+      resolveAlert(deps.db, kind);
+    }
+
+    recordHealthSample(deps.db, {
+      sampledAt: Math.floor(now() / 1000),
+      localHeight: probeResult.localHeight ?? null,
+      globalHeight: probeResult.globalHeight ?? null,
+      inSync: assessment.conditions.every((c) => c.kind !== "node_out_of_sync"),
+      peerCount: probeResult.peerCount ?? null,
+      secondsSinceLastBlock:
+        lastBlockAtMs === undefined ? null : Math.floor((now() - lastBlockAtMs) / 1000),
+      status: assessment.overall,
+    });
+
+    return assessment;
+  }
+
+  return {
+    start() {
+      deps.wsMonitor.start();
+      void tick();
+      timer = setInterval(() => void tick(), deps.intervalMs);
+    },
+    stop() {
+      if (timer) clearInterval(timer);
+      deps.wsMonitor.stop();
+    },
+    getLatest: () => latest,
+    tick,
+  };
+}
+```
+
+- [ ] **Step 7: Add the health samples repository**
+
+Create `src/ledger/healthSamples.ts`:
+
+```ts
+import type { Ledger } from "./db.ts";
+
+export interface HealthSampleInput {
+  sampledAt: number;
+  localHeight: number | null;
+  globalHeight: number | null;
+  inSync: boolean;
+  peerCount: number | null;
+  secondsSinceLastBlock: number | null;
+  status: string;
+}
+
+export function recordHealthSample(db: Ledger, sample: HealthSampleInput): void {
+  db.query(
+    `INSERT INTO health_samples
+       (sampled_at, local_height, global_height, in_sync, peer_count,
+        seconds_since_last_block, status)
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)`,
+  ).run(
+    sample.sampledAt,
+    sample.localHeight,
+    sample.globalHeight,
+    sample.inSync ? 1 : 0,
+    sample.peerCount,
+    sample.secondsSinceLastBlock,
+    sample.status,
+  );
+}
+
+/** Keeps the table bounded; the Pi's disk is not infinite and the page only charts recent history. */
+export function pruneHealthSamples(db: Ledger, olderThanEpochSeconds: number): number {
+  return db.query("DELETE FROM health_samples WHERE sampled_at < ?1").run(olderThanEpochSeconds)
+    .changes;
+}
+
+export function recentHealthSamples(db: Ledger, limit: number) {
+  return db
+    .query(
+      `SELECT sampled_at, local_height, global_height, in_sync, peer_count,
+              seconds_since_last_block, status
+         FROM health_samples ORDER BY sampled_at DESC LIMIT ?1`,
+    )
+    .all(limit);
+}
+```
+
+- [ ] **Step 8: Typecheck and commit**
+
+```bash
+bunx tsc --noEmit
+git add src/health src/ledger/healthSamples.ts tests/health
+git commit -m "feat: add alert hysteresis, HTTP probe and health monitor loop"
+```
+
+---
+
+## Task 18: Notification channels and fan-out
+
+**Files:**
+- Create: `src/notify/channel.ts`
+- Create: `src/notify/telegram.ts`
+- Create: `src/notify/discord.ts`
+- Create: `src/notify/email.ts`
+- Create: `src/notify/notifier.ts`
+- Test: `tests/notify/notifier.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/notify/notifier.test.ts`:
+
+```ts
+import { test, expect, describe, beforeEach } from "bun:test";
+import { openLedger } from "../../src/ledger/db.ts";
+import type { Ledger } from "../../src/ledger/db.ts";
+import { openAlert, listUnnotifiedAlerts } from "../../src/ledger/alerts.ts";
+import { createNotifier } from "../../src/notify/notifier.ts";
+import type { Channel } from "../../src/notify/channel.ts";
+
+let db: Ledger;
+beforeEach(() => {
+  db = openLedger(":memory:");
+});
+
+const recorder = (name: string, opts: { fails?: boolean } = {}) => {
+  const sent: string[] = [];
+  const channel: Channel = {
+    name,
+    minSeverity: "warning",
+    async send(message) {
+      if (opts.fails) throw new Error(`${name} unavailable`);
+      sent.push(message.title);
+    },
+  };
+  return { channel, sent };
+};
+
+describe("notifier", () => {
+  test("delivers a pending alert to every channel", async () => {
+    const a = recorder("telegram");
+    const b = recorder("discord");
+    openAlert(db, { kind: "testnet_stalled", severity: "critical", message: "no blocks" });
+
+    await createNotifier({ db, channels: [a.channel, b.channel] }).flush();
+
+    expect(a.sent).toHaveLength(1);
+    expect(b.sent).toHaveLength(1);
+    expect(listUnnotifiedAlerts(db)).toHaveLength(0);
+  });
+
+  test("marks an alert notified when at least one channel succeeds", async () => {
+    const ok = recorder("discord");
+    const broken = recorder("telegram", { fails: true });
+    openAlert(db, { kind: "low_peers", severity: "warning", message: "1 peer" });
+
+    await createNotifier({ db, channels: [broken.channel, ok.channel] }).flush();
+
+    expect(ok.sent).toHaveLength(1);
+    expect(listUnnotifiedAlerts(db)).toHaveLength(0);
+  });
+
+  test("OFFLINE RETRY: an alert stays queued when every channel fails", async () => {
+    // The Pi losing internet must not lose the alert. It fires on reconnect.
+    const broken = recorder("telegram", { fails: true });
+    openAlert(db, { kind: "wallet_low", severity: "warning", message: "low" });
+
+    const notifier = createNotifier({ db, channels: [broken.channel] });
+    await notifier.flush();
+    expect(listUnnotifiedAlerts(db)).toHaveLength(1);
+
+    // Connectivity returns; a working channel drains the queue.
+    const ok = recorder("telegram");
+    await createNotifier({ db, channels: [ok.channel] }).flush();
+    expect(ok.sent).toHaveLength(1);
+    expect(listUnnotifiedAlerts(db)).toHaveLength(0);
+  });
+
+  test("does not resend an already-notified alert", async () => {
+    const a = recorder("telegram");
+    openAlert(db, { kind: "low_peers", severity: "warning", message: "1 peer" });
+    const notifier = createNotifier({ db, channels: [a.channel] });
+    await notifier.flush();
+    await notifier.flush();
+    expect(a.sent).toHaveLength(1);
+  });
+
+  test("SEVERITY ROUTING: a warning skips a critical-only channel", async () => {
+    const criticalOnly = recorder("email");
+    criticalOnly.channel.minSeverity = "critical";
+    const everything = recorder("telegram");
+    openAlert(db, { kind: "low_peers", severity: "warning", message: "1 peer" });
+
+    await createNotifier({ db, channels: [criticalOnly.channel, everything.channel] }).flush();
+
+    expect(criticalOnly.sent).toHaveLength(0);
+    expect(everything.sent).toHaveLength(1);
+  });
+
+  test("a critical alert reaches a critical-only channel", async () => {
+    const criticalOnly = recorder("email");
+    criticalOnly.channel.minSeverity = "critical";
+    openAlert(db, { kind: "testnet_stalled", severity: "critical", message: "stuck" });
+    await createNotifier({ db, channels: [criticalOnly.channel] }).flush();
+    expect(criticalOnly.sent).toHaveLength(1);
+  });
+
+  test("flushing with no channels configured leaves alerts queued", async () => {
+    openAlert(db, { kind: "low_peers", severity: "warning", message: "1 peer" });
+    await createNotifier({ db, channels: [] }).flush();
+    expect(listUnnotifiedAlerts(db)).toHaveLength(1);
+  });
+
+  test("flushing an empty queue is harmless", async () => {
+    const a = recorder("telegram");
+    await createNotifier({ db, channels: [a.channel] }).flush();
+    expect(a.sent).toHaveLength(0);
+  });
+});
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `bun test tests/notify/notifier.test.ts`
+Expected: FAIL — `Cannot find module '../../src/notify/notifier.ts'`
+
+- [ ] **Step 3: Define the channel interface**
+
+Create `src/notify/channel.ts`:
+
+```ts
+import type { Severity } from "../ledger/alerts.ts";
+
+export interface NotificationMessage {
+  title: string;
+  body: string;
+  severity: Severity;
+}
+
+export interface Channel {
+  name: string;
+  /** 'warning' receives everything; 'critical' receives only critical alerts. */
+  minSeverity: Severity;
+  send: (message: NotificationMessage) => Promise<void>;
+}
+
+export function severityAllows(channelMin: Severity, messageSeverity: Severity): boolean {
+  if (channelMin === "warning") return true;
+  return messageSeverity === "critical";
+}
+```
+
+- [ ] **Step 4: Implement the three channels**
+
+Create `src/notify/telegram.ts`:
+
+```ts
+import type { Channel } from "./channel.ts";
+import type { Severity } from "../ledger/alerts.ts";
+
+export function createTelegramChannel(
+  cfg: { botToken: string; chatId: string },
+  minSeverity: Severity = "warning",
+): Channel {
+  return {
+    name: "telegram",
+    minSeverity,
+    async send(message) {
+      const res = await fetch(`https://api.telegram.org/bot${cfg.botToken}/sendMessage`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          chat_id: cfg.chatId,
+          text: `*${message.title}*\n${message.body}`,
+          parse_mode: "Markdown",
+        }),
+      });
+      if (!res.ok) throw new Error(`Telegram responded ${res.status}`);
+    },
+  };
+}
+```
+
+Create `src/notify/discord.ts`:
+
+```ts
+import type { Channel } from "./channel.ts";
+import type { Severity } from "../ledger/alerts.ts";
+
+export function createDiscordChannel(
+  cfg: { webhookUrl: string },
+  minSeverity: Severity = "warning",
+): Channel {
+  return {
+    name: "discord",
+    minSeverity,
+    async send(message) {
+      const res = await fetch(cfg.webhookUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: `**${message.title}**\n${message.body}` }),
+      });
+      if (!res.ok) throw new Error(`Discord responded ${res.status}`);
+    },
+  };
+}
+```
+
+Create `src/notify/email.ts`:
+
+```ts
+import type { Channel } from "./channel.ts";
+import type { Severity } from "../ledger/alerts.ts";
+
+/**
+ * Resend over HTTP rather than SMTP: no long-lived connections to babysit on a
+ * Pi, and the same fetch shape as the other channels.
+ */
+export function createEmailChannel(
+  cfg: { resendApiKey: string; to: string },
+  minSeverity: Severity = "critical",
+): Channel {
+  return {
+    name: "email",
+    minSeverity,
+    async send(message) {
+      const res = await fetch("https://api.resend.com/emails", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${cfg.resendApiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          from: "Signum Testnet Rewards <onboarding@resend.dev>",
+          to: [cfg.to],
+          subject: message.title,
+          text: message.body,
+        }),
+      });
+      if (!res.ok) throw new Error(`Resend responded ${res.status}`);
+    },
+  };
+}
+```
+
+The `from` address must be a domain verified in your Resend account; `onboarding@resend.dev` works for testing on the free tier.
+
+- [ ] **Step 5: Implement the notifier**
+
+Create `src/notify/notifier.ts`:
+
+```ts
+import type { Ledger } from "../ledger/db.ts";
+import type { Channel } from "./channel.ts";
+import { severityAllows } from "./channel.ts";
+import { listUnnotifiedAlerts, markAlertNotified } from "../ledger/alerts.ts";
+
+export interface NotifierDeps {
+  db: Ledger;
+  channels: Channel[];
+}
+
+export interface Notifier {
+  /** Delivers every alert not yet notified. Safe to call on a timer. */
+  flush: () => Promise<void>;
+}
+
+/**
+ * Fans alerts out to the configured channels.
+ *
+ * An alert is marked notified only if at least one channel accepted it, so a
+ * total outage (the Pi offline) leaves it queued and it fires on reconnect
+ * rather than being silently dropped. A channel throwing never propagates: one
+ * broken webhook must not stop the others.
+ */
+export function createNotifier(deps: NotifierDeps): Notifier {
+  return {
+    async flush() {
+      for (const alert of listUnnotifiedAlerts(deps.db)) {
+        const message = {
+          title: `[${alert.severity.toUpperCase()}] ${alert.kind}`,
+          body: alert.message,
+          severity: alert.severity,
+        };
+
+        const delivered: string[] = [];
+        for (const channel of deps.channels) {
+          if (!severityAllows(channel.minSeverity, alert.severity)) continue;
+          try {
+            await channel.send(message);
+            delivered.push(channel.name);
+          } catch {
+            // Deliberately swallowed: try the remaining channels, and leave the
+            // alert queued if none succeed.
+          }
+        }
+
+        if (delivered.length > 0) {
+          markAlertNotified(deps.db, alert.id, delivered);
+        }
+      }
+    },
+  };
+}
+```
+
+- [ ] **Step 6: Run the tests to verify they pass**
+
+Run: `bun test tests/notify/notifier.test.ts`
+Expected: `8 pass, 0 fail`
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/notify tests/notify
+git commit -m "feat: add notification channels with severity routing and offline retry"
+```
+
+---
+
+## Task 19: Read-model projection and Turso publisher
+
+The projection is a pure function over ledger state; both the publisher and the admin UI consume it, so a new stat is added in one place and appears in both.
+
+**Files:**
+- Create: `config/turso-schema.sql`
+- Create: `src/publish/projection.ts`
+- Create: `src/publish/tursoPublisher.ts`
+- Test: `tests/publish/projection.test.ts`
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/publish/projection.test.ts`:
+
+```ts
+import { test, expect, describe, beforeEach } from "bun:test";
+import { Amount } from "@signumjs/util";
+import { openLedger } from "../../src/ledger/db.ts";
+import type { Ledger } from "../../src/ledger/db.ts";
+import { recordBlockReward } from "../../src/ledger/blockRewards.ts";
+import { buildProjection } from "../../src/publish/projection.ts";
+
+let db: Ledger;
+beforeEach(() => {
+  db = openLedger(":memory:");
+});
+
+const accrue = (blockId: string, generatorId: string, signa: string, status = "accrued") =>
+  recordBlockReward(db, {
+    blockId,
+    height: Number(blockId.replace(/\D/g, "")) || 1,
+    blockTimestamp: 500_000,
+    chainDay: "2026-03-14",
+    generatorId,
+    generatorPublicKey: `pk-${generatorId}`,
+    status: status as "accrued",
+    amount: Amount.fromSigna(signa),
+  });
+
+const opts = { nowEpochSeconds: 1_800_000_000, chainDay: "2026-03-14", recentPayoutLimit: 20 };
+
+describe("buildProjection", () => {
+  test("summarises miners with paid and pending split out", () => {
+    accrue("b1", "acct-1", "2.5");
+    accrue("b2", "acct-1", "2.5");
+    accrue("b3", "acct-2", "2.5");
+
+    const projection = buildProjection(db, opts);
+    const miner = projection.miners.find((m) => m.accountId === "acct-1");
+    expect(miner?.blocksMined).toBe(2);
+    expect(miner?.pendingPlanck).toBe(500_000_000);
+    expect(miner?.paidPlanck).toBe(0);
+  });
+
+  test("counts skipped blocks separately and records the reason", () => {
+    accrue("b1", "acct-1", "2.5");
+    accrue("b2", "acct-1", "0", "skipped_no_mainnet_account");
+
+    const miner = buildProjection(db, opts).miners.find((m) => m.accountId === "acct-1");
+    expect(miner?.blocksMined).toBe(1);
+    expect(miner?.blocksSkipped).toBe(1);
+    expect(miner?.lastSkipReason).toBe("skipped_no_mainnet_account");
+  });
+
+  test("reports today's remaining budget", () => {
+    accrue("b1", "acct-1", "2.5");
+    const projection = buildProjection(db, {
+      ...opts,
+      globalDailyBudget: Amount.fromSigna("1000"),
+    });
+    expect(projection.status.budgetRemainingPlanck).toBe(99_750_000_000);
+  });
+
+  test("STALENESS: the status carries the timestamp the page checks", () => {
+    // Without this the page cannot tell a dead Pi from a healthy one.
+    const projection = buildProjection(db, opts);
+    expect(projection.status.updatedAt).toBe(opts.nowEpochSeconds);
+  });
+
+  test("amounts are emitted as planck integers, safe for JSON and SQL", () => {
+    accrue("b1", "acct-1", "2.5");
+    const miner = buildProjection(db, opts).miners.find((m) => m.accountId === "acct-1");
+    expect(Number.isInteger(miner?.pendingPlanck)).toBe(true);
+  });
+
+  test("produces an empty but well-formed projection on a fresh ledger", () => {
+    const projection = buildProjection(db, opts);
+    expect(projection.miners).toEqual([]);
+    expect(projection.payouts).toEqual([]);
+    expect(projection.status.totalDistributedPlanck).toBe(0);
+  });
+});
+```
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `bun test tests/publish/projection.test.ts`
+Expected: FAIL — `Cannot find module '../../src/publish/projection.ts'`
+
+- [ ] **Step 3: Write the Turso schema**
+
+Create `config/turso-schema.sql`:
+
+```sql
+-- Public read-model. Disposable: rebuildable at any time from the Pi's ledger.
+-- Contains no secrets and no internal error detail.
+
+CREATE TABLE IF NOT EXISTS status (
+  id                       INTEGER PRIMARY KEY CHECK (id = 1),
+  updated_at               INTEGER NOT NULL,
+  service_status           TEXT    NOT NULL,
+  payouts_enabled          INTEGER NOT NULL,
+  payouts_paused           INTEGER NOT NULL,
+  kill_switch              INTEGER NOT NULL,
+  testnet_height           INTEGER,
+  seconds_since_last_block INTEGER,
+  peer_count               INTEGER,
+  reward_per_block_planck  INTEGER,
+  budget_remaining_planck  INTEGER,
+  total_distributed_planck INTEGER,
+  distributed_24h_planck   INTEGER,
+  next_payout_at           INTEGER,
+  open_alerts              TEXT
+);
+
+CREATE TABLE IF NOT EXISTS miners (
+  account_id       TEXT PRIMARY KEY,
+  address          TEXT,
+  blocks_mined     INTEGER NOT NULL,
+  blocks_skipped   INTEGER NOT NULL,
+  pending_planck   INTEGER NOT NULL,
+  paid_planck      INTEGER NOT NULL,
+  last_block_at    INTEGER,
+  last_skip_reason TEXT,
+  cap_reached      INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS payouts (
+  batch_id        INTEGER PRIMARY KEY,
+  tx_id           TEXT,
+  confirmed_at    INTEGER,
+  recipient_count INTEGER,
+  total_planck    INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS payout_recipients (
+  batch_id      INTEGER NOT NULL,
+  recipient_id  TEXT    NOT NULL,
+  amount_planck INTEGER NOT NULL,
+  PRIMARY KEY (batch_id, recipient_id)
+);
+
+CREATE TABLE IF NOT EXISTS health_history (
+  sampled_at               INTEGER PRIMARY KEY,
+  status                   TEXT,
+  peer_count               INTEGER,
+  seconds_since_last_block INTEGER
+);
+```
+
+- [ ] **Step 4: Implement the projection**
+
+Create `src/publish/projection.ts`:
+
+```ts
+import { Amount } from "@signumjs/util";
+import type { Ledger } from "../ledger/db.ts";
+import type { BlockRewardStatus, ChainDay } from "../domain/types.ts";
+import { toPlanckInt } from "../domain/money.ts";
+import { sumAccruedGlobalOnDay } from "../ledger/blockRewards.ts";
+import { listRecentBatches } from "../ledger/batches.ts";
+import { listOpenAlerts } from "../ledger/alerts.ts";
+import { isPayoutsPaused, isKillSwitchTripped } from "../ledger/state.ts";
+
+export interface MinerRow {
+  accountId: string;
+  blocksMined: number;
+  blocksSkipped: number;
+  pendingPlanck: number;
+  paidPlanck: number;
+  lastBlockAt: number | null;
+  lastSkipReason: BlockRewardStatus | null;
+}
+
+export interface StatusRow {
+  updatedAt: number;
+  payoutsPaused: boolean;
+  killSwitch: boolean;
+  budgetRemainingPlanck: number;
+  totalDistributedPlanck: number;
+  openAlerts: string[];
+}
+
+export interface PayoutRow {
+  batchId: number;
+  txId: string | null;
+  confirmedAt: number | null;
+  recipientCount: number | null;
+  totalPlanck: number | null;
+}
+
+export interface Projection {
+  status: StatusRow;
+  miners: MinerRow[];
+  payouts: PayoutRow[];
+}
+
+export interface ProjectionOptions {
+  nowEpochSeconds: number;
+  chainDay: ChainDay;
+  recentPayoutLimit: number;
+  globalDailyBudget?: Amount;
+}
+
+/**
+ * Builds the public read-model from ledger state.
+ *
+ * Amounts leave as planck integers rather than Amount objects: this crosses a
+ * JSON and SQL boundary, and an exact integer survives both without a
+ * serialisation contract.
+ *
+ * Consumed by BOTH the Turso publisher and the admin UI, so a new statistic is
+ * added once and appears on both surfaces.
+ */
+export function buildProjection(db: Ledger, opts: ProjectionOptions): Projection {
+  const minerRows = db
+    .query(
+      `SELECT generator_id AS accountId,
+              SUM(CASE WHEN status = 'accrued' THEN 1 ELSE 0 END)                              AS blocksMined,
+              SUM(CASE WHEN status <> 'accrued' THEN 1 ELSE 0 END)                             AS blocksSkipped,
+              COALESCE(SUM(CASE WHEN status = 'accrued' AND batch_id IS NULL
+                                THEN amount_planck ELSE 0 END), 0)                             AS pendingPlanck,
+              COALESCE(SUM(CASE WHEN status = 'accrued' AND batch_id IS NOT NULL
+                                THEN amount_planck ELSE 0 END), 0)                             AS paidPlanck,
+              MAX(block_timestamp)                                                             AS lastBlockAt
+         FROM block_rewards
+        GROUP BY generator_id`,
+    )
+    .all() as Omit<MinerRow, "lastSkipReason">[];
+
+  const skipStmt = db.query(
+    `SELECT status FROM block_rewards
+      WHERE generator_id = ?1 AND status <> 'accrued'
+      ORDER BY height DESC LIMIT 1`,
+  );
+
+  const miners: MinerRow[] = minerRows.map((m) => {
+    const skip = skipStmt.get(m.accountId) as { status: BlockRewardStatus } | null;
+    return { ...m, lastSkipReason: skip?.status ?? null };
+  });
+
+  const totalDistributedPlanck = (
+    db
+      .query(
+        `SELECT COALESCE(SUM(amount_planck), 0) AS total
+           FROM block_rewards WHERE status = 'accrued' AND batch_id IS NOT NULL`,
+      )
+      .get() as { total: number }
+  ).total;
+
+  const spentToday = sumAccruedGlobalOnDay(db, opts.chainDay);
+  const budgetRemainingPlanck = opts.globalDailyBudget
+    ? toPlanckInt(opts.globalDailyBudget.clone().subtract(spentToday))
+    : 0;
+
+  const payouts: PayoutRow[] = listRecentBatches(db, opts.recentPayoutLimit)
+    .filter((b) => b.status === "confirmed")
+    .map((b) => ({
+      batchId: b.id,
+      txId: b.txId,
+      confirmedAt: null,
+      recipientCount: b.recipientCount,
+      totalPlanck: b.total ? toPlanckInt(b.total) : null,
+    }));
+
+  return {
+    status: {
+      updatedAt: opts.nowEpochSeconds,
+      payoutsPaused: isPayoutsPaused(db),
+      killSwitch: isKillSwitchTripped(db),
+      budgetRemainingPlanck,
+      totalDistributedPlanck,
+      openAlerts: listOpenAlerts(db).map((a) => a.kind),
+    },
+    miners,
+    payouts,
+  };
+}
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `bun test tests/publish/projection.test.ts`
+Expected: `6 pass, 0 fail`
+
+- [ ] **Step 6: Implement the publisher**
+
+Create `src/publish/tursoPublisher.ts`:
+
+```ts
+import { createClient } from "@libsql/client";
+import type { Client } from "@libsql/client";
+import type { Projection } from "./projection.ts";
+
+export interface Publisher {
+  publish: (projection: Projection) => Promise<void>;
+  close: () => void;
+}
+
+/**
+ * Pushes the read-model to Turso.
+ *
+ * Deliberately stateless: `status` and `miners` are upserted from current state
+ * every tick, so a failed push needs no queue — the next tick simply republishes
+ * the truth. That is why the local ledger stays authoritative and this database
+ * can be dropped and rebuilt at any time.
+ */
+export function createTursoPublisher(cfg: { url: string; authToken: string }): Publisher {
+  const client: Client = createClient({ url: cfg.url, authToken: cfg.authToken });
+
+  return {
+    async publish(projection) {
+      const statements = [
+        {
+          sql: `INSERT INTO status (id, updated_at, service_status, payouts_enabled,
+                                    payouts_paused, kill_switch, budget_remaining_planck,
+                                    total_distributed_planck, open_alerts)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                  updated_at               = excluded.updated_at,
+                  service_status           = excluded.service_status,
+                  payouts_enabled          = excluded.payouts_enabled,
+                  payouts_paused           = excluded.payouts_paused,
+                  kill_switch              = excluded.kill_switch,
+                  budget_remaining_planck  = excluded.budget_remaining_planck,
+                  total_distributed_planck = excluded.total_distributed_planck,
+                  open_alerts              = excluded.open_alerts`,
+          args: [
+            projection.status.updatedAt,
+            projection.status.openAlerts.length === 0 ? "ok" : "degraded",
+            1,
+            projection.status.payoutsPaused ? 1 : 0,
+            projection.status.killSwitch ? 1 : 0,
+            projection.status.budgetRemainingPlanck,
+            projection.status.totalDistributedPlanck,
+            JSON.stringify(projection.status.openAlerts),
+          ],
+        },
+        ...projection.miners.map((m) => ({
+          sql: `INSERT INTO miners (account_id, blocks_mined, blocks_skipped,
+                                    pending_planck, paid_planck, last_block_at, last_skip_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account_id) DO UPDATE SET
+                  blocks_mined     = excluded.blocks_mined,
+                  blocks_skipped   = excluded.blocks_skipped,
+                  pending_planck   = excluded.pending_planck,
+                  paid_planck      = excluded.paid_planck,
+                  last_block_at    = excluded.last_block_at,
+                  last_skip_reason = excluded.last_skip_reason`,
+          args: [
+            m.accountId,
+            m.blocksMined,
+            m.blocksSkipped,
+            m.pendingPlanck,
+            m.paidPlanck,
+            m.lastBlockAt,
+            m.lastSkipReason,
+          ],
+        })),
+        ...projection.payouts.map((p) => ({
+          sql: `INSERT INTO payouts (batch_id, tx_id, confirmed_at, recipient_count, total_planck)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(batch_id) DO UPDATE SET
+                  tx_id           = excluded.tx_id,
+                  confirmed_at    = excluded.confirmed_at,
+                  recipient_count = excluded.recipient_count,
+                  total_planck    = excluded.total_planck`,
+          args: [p.batchId, p.txId, p.confirmedAt, p.recipientCount, p.totalPlanck],
+        })),
+      ];
+
+      await client.batch(statements, "write");
+    },
+    close() {
+      client.close();
+    },
+  };
+}
+```
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add src/publish config/turso-schema.sql tests/publish
+git commit -m "feat: add read-model projection and stateless Turso publisher"
+```
+
+---
+
+## Task 20: Admin UI — design system foundation and LAN server
+
+Now that this repo is GPL-3.0-or-later, the design system from `signum-node`'s `feat/new-web-ui` branch can be reused directly. The token file is the shared artifact: five themes (`nexus`, `solaris`, `dawn`, `terminal`, `aurora`), each defining an identical set of CSS variables, so components style against `var(--panel)`, `var(--blue2)` and friends and theme correctly in all five.
+
+**Files:**
+- Create: `src/ui/theme.css`
+- Create: `src/ui/components/{Card,Badge,SignaAmount}.tsx`
+- Create: `src/admin/index.html`
+- Create: `src/admin/app.tsx`
+- Create: `src/admin/server.ts`
+- Create: `bunfig.toml`
+- Test: `tests/admin/server.test.ts`
+
+- [ ] **Step 1: Install UI dependencies**
+
+```bash
+bun add react react-dom framer-motion
+bun add -d @types/react @types/react-dom tailwindcss bun-plugin-tailwind
+```
+
+- [ ] **Step 2: Copy the theme tokens**
+
+```bash
+cd /Users/oliverhager/Code/signum/signum-node
+git show feat/new-web-ui:web/src/index.css > /Users/oliverhager/Code/signum/signum-testnet-rewards/src/ui/theme.css
+cd /Users/oliverhager/Code/signum/signum-testnet-rewards
+head -30 src/ui/theme.css
+```
+
+Expected: the file starts with `@import "tailwindcss";` followed by the `:root, [data-theme="nexus"]` token block.
+
+Add a provenance header at the top of `src/ui/theme.css`, immediately after the `@import` line:
+
+```css
+/*
+ * Theme tokens from signum-node (GPL-3.0), branch feat/new-web-ui,
+ * web/src/index.css. Reused here under the same licence.
+ *
+ * Every theme defines the SAME variable contract. Components must consume
+ * var(--token) only and never hard-code a colour, or they will break when the
+ * theme changes.
+ */
+```
+
+- [ ] **Step 3: Configure the Tailwind plugin for Bun**
+
+Create `bunfig.toml`:
+
+```toml
+[serve.static]
+plugins = ["bun-plugin-tailwind"]
+```
+
+- [ ] **Step 4: Write the failing server test**
+
+Create `tests/admin/server.test.ts`:
+
+```ts
+import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { openLedger } from "../../src/ledger/db.ts";
+import type { Ledger } from "../../src/ledger/db.ts";
+import { createAdminServer } from "../../src/admin/server.ts";
+import type { AdminServer } from "../../src/admin/server.ts";
+import { isPayoutsPaused, isKillSwitchTripped, tripKillSwitch } from "../../src/ledger/state.ts";
+import { Amount } from "@signumjs/util";
+
+let db: Ledger;
+let server: AdminServer;
+let base: string;
+const TOKEN = "test-token";
+
+beforeEach(() => {
+  db = openLedger(":memory:");
+  server = createAdminServer({
+    db,
+    token: TOKEN,
+    host: "127.0.0.1",
+    port: 0, // ephemeral
+    minPayout: Amount.fromSigna("5"),
+    rails: {
+      maxPerRecipientPerBatch: Amount.fromSigna("200"),
+      maxPerBatch: Amount.fromSigna("2000"),
+      maxPerWallClockDay: Amount.fromSigna("3000"),
+    },
+    globalDailyBudget: Amount.fromSigna("1000"),
+    getHealth: () => undefined,
+  });
+  base = server.url;
+});
+afterEach(() => server.stop());
+
+const auth = { headers: { "x-admin-token": TOKEN } };
+
+describe("admin server auth", () => {
+  test("rejects an API request with no token", async () => {
+    const res = await fetch(`${base}/api/state`);
+    expect(res.status).toBe(401);
+  });
+
+  test("rejects an API request with a wrong token", async () => {
+    const res = await fetch(`${base}/api/state`, { headers: { "x-admin-token": "nope" } });
+    expect(res.status).toBe(401);
+  });
+
+  test("accepts a request with the correct token", async () => {
+    const res = await fetch(`${base}/api/state`, auth);
+    expect(res.status).toBe(200);
+  });
+});
+
+describe("admin server routes", () => {
+  test("GET /api/state returns the projection, health and a dry-run", async () => {
+    const body = (await (await fetch(`${base}/api/state`, auth)).json()) as Record<string, unknown>;
+    expect(body).toHaveProperty("projection");
+    expect(body).toHaveProperty("dryRun");
+    expect(body).toHaveProperty("openAlerts");
+  });
+
+  test("POST /api/pause and /api/resume toggle payouts", async () => {
+    await fetch(`${base}/api/pause`, { method: "POST", ...auth });
+    expect(isPayoutsPaused(db)).toBe(true);
+    await fetch(`${base}/api/resume`, { method: "POST", ...auth });
+    expect(isPayoutsPaused(db)).toBe(false);
+  });
+
+  test("POST /api/kill-switch/clear clears a tripped kill switch", async () => {
+    tripKillSwitch(db, "test trip");
+    expect(isKillSwitchTripped(db)).toBe(true);
+    const res = await fetch(`${base}/api/kill-switch/clear`, { method: "POST", ...auth });
+    expect(res.status).toBe(200);
+    expect(isKillSwitchTripped(db)).toBe(false);
+  });
+
+  test("DRY RUN IS READ-ONLY: requesting it creates no batch", async () => {
+    await fetch(`${base}/api/dry-run`, auth);
+    const batches = db.query("SELECT COUNT(*) AS c FROM batches").get() as { c: number };
+    expect(batches.c).toBe(0);
+  });
+
+  test("mutating routes reject GET", async () => {
+    const res = await fetch(`${base}/api/pause`, auth);
+    expect(res.status).toBe(405);
+  });
+
+  test("an unknown API route returns 404", async () => {
+    const res = await fetch(`${base}/api/nonsense`, auth);
+    expect(res.status).toBe(404);
+  });
+
+  test("the admin token never appears in a response body", async () => {
+    const text = await (await fetch(`${base}/api/state`, auth)).text();
+    expect(text).not.toContain(TOKEN);
+  });
+});
+```
+
+- [ ] **Step 5: Run it to verify it fails**
+
+Run: `bun test tests/admin/server.test.ts`
+Expected: FAIL — `Cannot find module '../../src/admin/server.ts'`
+
+- [ ] **Step 6: Implement the server**
+
+Create `src/admin/server.ts`:
+
+```ts
+import type { Amount } from "@signumjs/util";
+import type { Ledger } from "../ledger/db.ts";
+import type { RailsConfig } from "../domain/rails.ts";
+import type { HealthAssessment } from "../health/healthState.ts";
+import { buildProjection } from "../publish/projection.ts";
+import { dryRunBatch } from "../payout/dryRun.ts";
+import { toChainDay } from "../domain/chainDay.ts";
+import { ChainTime } from "@signumjs/util";
+import { listOpenAlerts } from "../ledger/alerts.ts";
+import { setPayoutsPaused, clearKillSwitch, getKillSwitchReason } from "../ledger/state.ts";
+import { sumBroadcastSinceWallClock } from "../ledger/batches.ts";
+
+export interface AdminServerDeps {
+  db: Ledger;
+  token: string;
+  host: string;
+  port: number;
+  minPayout: Amount;
+  rails: RailsConfig;
+  globalDailyBudget: Amount;
+  getHealth: () => HealthAssessment | undefined;
+}
+
+export interface AdminServer {
+  url: string;
+  stop: () => void;
+}
+
+/** Length-independent comparison so the token cannot be probed by timing. */
+function tokensMatch(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+const json = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+
+export function createAdminServer(deps: AdminServerDeps): AdminServer {
+  const startOfWallClockDay = () => {
+    const d = new Date();
+    d.setUTCHours(0, 0, 0, 0);
+    return Math.floor(d.getTime() / 1000);
+  };
+
+  const currentDryRun = () =>
+    dryRunBatch(deps.db, {
+      minPayout: deps.minPayout,
+      rails: deps.rails,
+      spentToday: sumBroadcastSinceWallClock(deps.db, startOfWallClockDay()),
+    });
+
+  const server = Bun.serve({
+    hostname: deps.host,
+    port: deps.port,
+    async fetch(req) {
+      const url = new URL(req.url);
+
+      if (!url.pathname.startsWith("/api/")) {
+        return new Response(Bun.file(new URL("./index.html", import.meta.url).pathname), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+
+      const supplied = req.headers.get("x-admin-token") ?? url.searchParams.get("token") ?? "";
+      if (!tokensMatch(supplied, deps.token)) {
+        return json({ error: "unauthorized" }, 401);
+      }
+
+      const requirePost = () => req.method === "POST";
+
+      switch (url.pathname) {
+        case "/api/state": {
+          const nowSeconds = Math.floor(Date.now() / 1000);
+          return json({
+            projection: buildProjection(deps.db, {
+              nowEpochSeconds: nowSeconds,
+              chainDay: toChainDay(ChainTime.fromDate(new Date()).getChainTimestamp()),
+              recentPayoutLimit: 20,
+              globalDailyBudget: deps.globalDailyBudget,
+            }),
+            health: deps.getHealth() ?? null,
+            openAlerts: listOpenAlerts(deps.db),
+            killSwitchReason: getKillSwitchReason(deps.db) ?? null,
+            dryRun: serialiseDryRun(currentDryRun()),
+          });
+        }
+        case "/api/dry-run":
+          return json(serialiseDryRun(currentDryRun()));
+        case "/api/pause":
+          if (!requirePost()) return json({ error: "method not allowed" }, 405);
+          setPayoutsPaused(deps.db, true);
+          return json({ ok: true, paused: true });
+        case "/api/resume":
+          if (!requirePost()) return json({ error: "method not allowed" }, 405);
+          setPayoutsPaused(deps.db, false);
+          return json({ ok: true, paused: false });
+        case "/api/kill-switch/clear":
+          if (!requirePost()) return json({ error: "method not allowed" }, 405);
+          clearKillSwitch(deps.db);
+          return json({ ok: true });
+        default:
+          return json({ error: "not found" }, 404);
+      }
+    },
+  });
+
+  return {
+    url: `http://${server.hostname}:${server.port}`,
+    stop: () => server.stop(true),
+  };
+}
+
+/** Amounts become planck integers so the response is plain JSON. */
+function serialiseDryRun(report: ReturnType<typeof dryRunBatch>) {
+  return {
+    wouldSend: report.wouldSend,
+    requiresOrdinarySend: report.requiresOrdinarySend,
+    railsVerdict: report.railsVerdict,
+    totalPlanck: report.draft.total.getPlanck(),
+    recipients: report.draft.recipients.map((r) => ({
+      recipientId: r.recipientId,
+      planck: r.amount.getPlanck(),
+    })),
+    deferredDust: report.deferredDust.map((d) => d.recipientId),
+    deferredOverflow: report.deferredOverflow.map((d) => d.recipientId),
+  };
+}
+```
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `bun test tests/admin/server.test.ts`
+Expected: `11 pass, 0 fail`
+
+- [ ] **Step 8: Port the shared UI components**
+
+Create `src/ui/components/Card.tsx` — adapted from `signum-node` `web/src/components/ui/Card.tsx` (GPL-3.0), with the `@/lib/utils` `cn` dependency replaced by a local helper:
+
+```tsx
+import { motion, type HTMLMotionProps } from "framer-motion";
+
+const SPRING = { type: "spring" as const, stiffness: 300, damping: 20 };
+
+const cn = (...parts: (string | false | undefined)[]) => parts.filter(Boolean).join(" ");
+
+interface CardProps extends Omit<HTMLMotionProps<"div">, "children"> {
+  padding?: boolean;
+  interactive?: boolean;
+  children?: React.ReactNode;
+}
+
+export function Card({ children, className, padding = true, interactive = false, ...props }: CardProps) {
+  return (
+    <motion.div
+      className={cn("relative backdrop-blur-[8px]", padding && "p-5", className)}
+      style={{ background: "var(--panel)", border: "1px solid var(--border)", ...props.style }}
+      whileHover={interactive ? { y: -2, boxShadow: "var(--card-hover)" } : undefined}
+      transition={SPRING}
+      {...props}
+    >
+      {/* Tactical accent: top-left and bottom-right only */}
+      <div className="pointer-events-none absolute -left-px -top-px h-[14px] w-[14px] border-l-2 border-t-2 border-[var(--blue2)]" />
+      <div className="pointer-events-none absolute -bottom-px -right-px h-[14px] w-[14px] border-b-2 border-r-2 border-[var(--blue2)]" />
+      {children}
+    </motion.div>
+  );
+}
+
+export function CardLabel({ children, className }: { children: React.ReactNode; className?: string }) {
+  return (
+    <p className={cn("mb-2.5 text-[9px] font-semibold uppercase tracking-[3px] text-[var(--blue2)]", className)}>
+      {children}
+    </p>
+  );
+}
+
+export function CardSub({ children, className }: { children: React.ReactNode; className?: string }) {
+  return <p className={cn("mt-1.5 text-[10px] tracking-[1px] text-[var(--muted)]", className)}>{children}</p>;
+}
+```
+
+Create `src/ui/components/SignaAmount.tsx` — takes planck (what the API returns) and renders the fractional part smaller, matching the node UI:
+
+```tsx
+const cn = (...parts: (string | false | undefined)[]) => parts.filter(Boolean).join(" ");
+
+const PLANCK_PER_SIGNA = 100_000_000n;
+
+/** Formats a planck value. Input is a string because it crosses a JSON boundary. */
+export function SignaAmount({
+  planck,
+  decimals = 2,
+  className,
+}: {
+  planck: string;
+  decimals?: number;
+  className?: string;
+}) {
+  const value = BigInt(planck);
+  const whole = value / PLANCK_PER_SIGNA;
+  const frac = (value % PLANCK_PER_SIGNA).toString().padStart(8, "0").slice(0, decimals);
+  return (
+    <span className={cn("tabular-nums", className)}>
+      {new Intl.NumberFormat().format(whole)}
+      <span style={{ fontSize: "0.65em", opacity: 0.6 }}>.{frac}</span>
+    </span>
+  );
+}
+```
+
+Create `src/ui/components/Badge.tsx`:
+
+```tsx
+type Tone = "ok" | "warn" | "crit" | "muted";
+
+const TONE: Record<Tone, string> = {
+  ok: "var(--green)",
+  warn: "var(--amber)",
+  crit: "var(--mag)",
+  muted: "var(--muted)",
+};
+
+export function Badge({ tone = "muted", children }: { tone?: Tone; children: React.ReactNode }) {
+  return (
+    <span
+      className="inline-block px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[2px]"
+      style={{ color: TONE[tone], border: `1px solid ${TONE[tone]}` }}
+    >
+      {children}
+    </span>
+  );
+}
+```
+
+- [ ] **Step 9: Build the admin page**
+
+Create `src/admin/index.html`:
+
+```html
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Signum Testnet Rewards — Admin</title>
+    <link rel="stylesheet" href="../ui/theme.css" />
+  </head>
+  <body data-theme="nexus">
+    <div id="root"></div>
+    <script type="module" src="./app.tsx"></script>
+  </body>
+</html>
+```
+
+Create `src/admin/app.tsx`:
+
+```tsx
+import { useEffect, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { Card, CardLabel, CardSub } from "../ui/components/Card.tsx";
+import { Badge } from "../ui/components/Badge.tsx";
+import { SignaAmount } from "../ui/components/SignaAmount.tsx";
+
+/** The token is supplied via the URL once, then kept in memory only. */
+const token = new URLSearchParams(location.search).get("token") ?? "";
+const api = (path: string, init?: RequestInit) =>
+  fetch(`/api/${path}`, { ...init, headers: { "x-admin-token": token } });
+
+interface State {
+  projection: { status: Record<string, unknown>; miners: unknown[] };
+  health: { overall: string; conditions: { kind: string; message: string }[] } | null;
+  openAlerts: { kind: string; severity: string; message: string }[];
+  killSwitchReason: string | null;
+  dryRun: {
+    wouldSend: boolean;
+    totalPlanck: string;
+    recipients: { recipientId: string; planck: string }[];
+    railsVerdict: { ok: boolean; violation?: string; detail?: string };
+  };
+}
+
+function App() {
+  const [state, setState] = useState<State | undefined>();
+  const [busy, setBusy] = useState(false);
+
+  const refresh = async () => setState((await (await api("state")).json()) as State);
+  useEffect(() => {
+    void refresh();
+    const t = setInterval(() => void refresh(), 5000);
+    return () => clearInterval(t);
+  }, []);
+
+  const act = async (path: string) => {
+    setBusy(true);
+    await api(path, { method: "POST" });
+    await refresh();
+    setBusy(false);
+  };
+
+  if (!state) return <main className="p-8 text-[var(--muted)]">Loading…</main>;
+
+  const tone =
+    state.health?.overall === "critical" ? "crit" : state.health?.overall === "warning" ? "warn" : "ok";
+
+  return (
+    <main
+      className="min-h-screen p-6"
+      style={{ background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font-body)" }}
+    >
+      <h1
+        className="mb-6 text-[18px] uppercase tracking-[6px]"
+        style={{ fontFamily: "var(--font-display)", color: "var(--blue2)" }}
+      >
+        Testnet Rewards — Admin
+      </h1>
+
+      <div className="grid gap-4 md:grid-cols-3">
+        <Card>
+          <CardLabel>Service health</CardLabel>
+          <Badge tone={tone}>{state.health?.overall ?? "unknown"}</Badge>
+          {state.health?.conditions.map((c) => (
+            <CardSub key={c.kind}>{c.message}</CardSub>
+          ))}
+        </Card>
+
+        <Card>
+          <CardLabel>Kill switch</CardLabel>
+          <Badge tone={state.killSwitchReason ? "crit" : "ok"}>
+            {state.killSwitchReason ? "tripped" : "clear"}
+          </Badge>
+          {state.killSwitchReason && <CardSub>{state.killSwitchReason}</CardSub>}
+        </Card>
+
+        <Card>
+          <CardLabel>Next batch (dry run)</CardLabel>
+          <p className="text-[26px]" style={{ fontFamily: "var(--font-display)" }}>
+            <SignaAmount planck={state.dryRun.totalPlanck} />
+          </p>
+          <CardSub>
+            {state.dryRun.recipients.length} recipients ·{" "}
+            {state.dryRun.wouldSend ? "would send" : "blocked"}
+          </CardSub>
+          {!state.dryRun.railsVerdict.ok && (
+            <CardSub>
+              rail: {state.dryRun.railsVerdict.violation} — {state.dryRun.railsVerdict.detail}
+            </CardSub>
+          )}
+        </Card>
+      </div>
+
+      <div className="mt-6 flex gap-3">
+        <button disabled={busy} onClick={() => void act("pause")} style={btn}>
+          Pause payouts
+        </button>
+        <button disabled={busy} onClick={() => void act("resume")} style={btn}>
+          Resume payouts
+        </button>
+        <button disabled={busy} onClick={() => void act("kill-switch/clear")} style={btn}>
+          Clear kill switch
+        </button>
+      </div>
+
+      <Card className="mt-6">
+        <CardLabel>Open alerts</CardLabel>
+        {state.openAlerts.length === 0 ? (
+          <CardSub>none</CardSub>
+        ) : (
+          state.openAlerts.map((a) => (
+            <CardSub key={a.kind}>
+              [{a.severity}] {a.kind} — {a.message}
+            </CardSub>
+          ))
+        )}
+      </Card>
+    </main>
+  );
+}
+
+const btn: React.CSSProperties = {
+  border: "1px solid var(--border2)",
+  color: "var(--blue2)",
+  background: "var(--surface-tint)",
+  padding: "8px 16px",
+  fontSize: 10,
+  letterSpacing: 2,
+  textTransform: "uppercase",
+};
+
+const root = document.getElementById("root");
+if (root) createRoot(root).render(<App />);
+```
+
+- [ ] **Step 10: Verify the page renders**
+
+```bash
+bun run src/main.ts &
+sleep 3
+curl -s "http://127.0.0.1:3100/api/state?token=$ADMIN_TOKEN" | head -c 300
+```
+
+Expected: a JSON object containing `projection`, `health` and `dryRun`. Then open `http://<pi-lan-ip>:3100/?token=<ADMIN_TOKEN>` in a browser and confirm the dark `nexus` theme renders with bracketed card corners.
+
+- [ ] **Step 11: Commit**
+
+```bash
+git add src/ui src/admin bunfig.toml tests/admin package.json bun.lock
+git commit -m "feat: add admin UI on the shared signum design system"
+```
+
+---
+
+## Task 21: Composition root, pm2 and configuration
+
+**Files:**
+- Create: `src/main.ts`
+- Create: `config/ecosystem.config.cjs`
+- Create: `config/.env.example`
+- Modify: `docs/superpowers/specs/2026-09-05-signum-testnet-rewards-design.md`
+- Delete: `index.ts`
+
+- [ ] **Step 1: Write the composition root**
+
+Create `src/main.ts`:
+
+```ts
+import { loadConfig, resolvePaths } from "./config/load.ts";
+import { openLedger } from "./ledger/db.ts";
+import { createMainnetPool } from "./chain/mainnetPool.ts";
+import { createTestnetClient } from "./chain/testnetClient.ts";
+import { getFreshAccount, upsertAccount } from "./ledger/mainnetAccounts.ts";
+import type { MainnetAccountFacts } from "./eligibility/eligibility.ts";
+import { createIndexer } from "./indexer/indexer.ts";
+import { createWsMonitor } from "./health/wsMonitor.ts";
+import { createHttpProbe } from "./health/httpProbe.ts";
+import { createHealthMonitor } from "./health/monitor.ts";
+import { createNotifier } from "./notify/notifier.ts";
+import { createTelegramChannel } from "./notify/telegram.ts";
+import { createDiscordChannel } from "./notify/discord.ts";
+import { createEmailChannel } from "./notify/email.ts";
+import type { Channel } from "./notify/channel.ts";
+import { buildProjection } from "./publish/projection.ts";
+import { createTursoPublisher } from "./publish/tursoPublisher.ts";
+import { createAdminServer } from "./admin/server.ts";
+import { toChainDay } from "./domain/chainDay.ts";
+import { ChainTime } from "@signumjs/util";
+import { pruneHealthSamples } from "./ledger/healthSamples.ts";
+
+// Config validation runs FIRST and throws before anything opens a database.
+// The volume sentinel check lives inside loadConfig for exactly this reason.
+const config = loadConfig();
+const paths = resolvePaths(config);
+const db = openLedger(paths.databasePath);
+
+console.log(`[boot] data dir ${config.dataDir}`);
+console.log(`[boot] payouts ${config.payouts.enabled ? "ENABLED" : "DISABLED (shadow mode)"}`);
+
+const mainnet = createMainnetPool(config.chain.mainnetNodeHosts);
+const testnet = createTestnetClient(config.chain.testnetNodeHost);
+
+/** Cached mainnet lookup. Negative results expire sooner so activation takes effect quickly. */
+async function lookupMainnetAccount(accountId: string): Promise<MainnetAccountFacts | undefined> {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const cached = getFreshAccount(
+    db,
+    accountId,
+    {
+      positiveSeconds: config.publish.accountTtlPositiveSeconds,
+      negativeSeconds: config.publish.accountTtlNegativeSeconds,
+    },
+    nowSeconds,
+  );
+  if (cached) return { isActive: cached.isActive, publicKey: cached.publicKey };
+
+  const account = await mainnet.getAccount(accountId);
+  const facts = {
+    accountId,
+    publicKey: account?.publicKey ?? null,
+    isActive: Boolean(account?.publicKey),
+  };
+  upsertAccount(db, facts, nowSeconds);
+  return { isActive: facts.isActive, publicKey: facts.publicKey };
+}
+
+const channels: Channel[] = [];
+if (config.notify.telegram) channels.push(createTelegramChannel(config.notify.telegram));
+if (config.notify.discord) channels.push(createDiscordChannel(config.notify.discord));
+if (config.notify.email) channels.push(createEmailChannel(config.notify.email));
+console.log(`[boot] notification channels: ${channels.map((c) => c.name).join(", ") || "none"}`);
+
+const notifier = createNotifier({ db, channels });
+const wsMonitor = createWsMonitor(config.chain.testnetWsUrl);
+const healthMonitor = createHealthMonitor({
+  db,
+  config,
+  wsMonitor,
+  probe: createHttpProbe(testnet),
+  intervalMs: 60_000,
+});
+
+const publisher = createTursoPublisher({
+  url: config.publish.tursoDatabaseUrl,
+  authToken: config.publish.tursoAuthToken,
+});
+
+const indexer = createIndexer({
+  db,
+  config,
+  walkerCachePath: paths.walkerCachePath,
+  lookupMainnetAccount,
+  isExcluded: () => false,
+  onBlockObserved: () => {},
+});
+
+const adminServer = createAdminServer({
+  db,
+  token: config.admin.token,
+  host: config.admin.bindHost,
+  port: config.admin.port,
+  minPayout: config.minPayout,
+  rails: config.rails,
+  globalDailyBudget: config.policy.globalDailyBudget,
+  getHealth: () => healthMonitor.getLatest(),
+});
+console.log(`[boot] admin UI on ${adminServer.url}`);
+
+async function publishTick() {
+  try {
+    await publisher.publish(
+      buildProjection(db, {
+        nowEpochSeconds: Math.floor(Date.now() / 1000),
+        chainDay: toChainDay(ChainTime.fromDate(new Date()).getChainTimestamp()),
+        recentPayoutLimit: 20,
+        globalDailyBudget: config.policy.globalDailyBudget,
+      }),
+    );
+  } catch (e) {
+    // Publishing is best-effort: the next tick republishes from live state, so a
+    // failure needs no queue and must never stop indexing.
+    console.error("[publish] failed:", e instanceof Error ? e.message : e);
+  }
+}
+
+healthMonitor.start();
+const publishTimer = setInterval(() => void publishTick(), config.publish.intervalSeconds * 1000);
+const notifyTimer = setInterval(() => void notifier.flush(), 30_000);
+const pruneTimer = setInterval(
+  () => pruneHealthSamples(db, Math.floor(Date.now() / 1000) - 30 * 86_400),
+  6 * 3_600_000,
+);
+
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${signal}`);
+  clearInterval(publishTimer);
+  clearInterval(notifyTimer);
+  clearInterval(pruneTimer);
+  healthMonitor.stop();
+  adminServer.stop();
+  await indexer.stop();
+  publisher.close();
+  db.close();
+  process.exit(0);
+}
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+// Runs until stopped. walk() catches up, then listen() takes over.
+await indexer.run();
+```
+
+- [ ] **Step 2: Write the pm2 config**
+
+Create `config/ecosystem.config.cjs`:
+
+```js
+module.exports = {
+  apps: [
+    {
+      name: "signum-testnet-rewards",
+      script: "src/main.ts",
+      // Absolute: pm2's PATH is not your login shell's.
+      interpreter: "/home/pi/.bun/bin/bun",
+      cwd: "/home/pi/signum-testnet-rewards",
+
+      // LOAD-BEARING, not a tuning knob. Two instances would mean two SQLite
+      // writers and two payout batches in flight, breaking the single-batch
+      // invariant that crash reconciliation depends on. Do not raise this.
+      instances: 1,
+
+      autorestart: true,
+      restart_delay: 5000,
+      max_restarts: 10,
+      max_memory_restart: "400M",
+      time: true,
+    },
+  ],
+};
+```
+
+- [ ] **Step 3: Write the example environment**
+
+Create `config/.env.example`:
+
+```
+# Money settings are declared in SIGNA, not planck. All are REQUIRED with no
+# defaults: the service refuses to start rather than pay a guessed amount.
+# Agreed parameters: ~900 SIGNA/day at Signum's ~360 blocks/day.
+REWARD_PER_BLOCK_SIGNA=2.5
+ACCOUNT_DAILY_CAP_SIGNA=100
+GLOBAL_DAILY_BUDGET_SIGNA=1000
+MIN_PAYOUT_SIGNA=5
+MAX_PER_RECIPIENT_PER_BATCH_SIGNA=200
+MAX_PER_BATCH_SIGNA=2000
+MAX_PER_WALLCLOCK_DAY_SIGNA=3000
+MIN_WALLET_BALANCE_SIGNA=5000
+MAX_FEE_SIGNA=1
+
+# --- chain ---
+TESTNET_NODE_HOST=http://localhost:6876
+TESTNET_WS_URL=ws://localhost:6877/events
+MAINNET_NODE_HOSTS=<node-1>,<node-2>
+START_HEIGHT=<height at first launch>
+BLOCK_OFFSET=2
+WALKER_INTERVAL_SECONDS=5
+
+# --- payouts (Phase 2; keep false during shadow mode) ---
+PAYOUTS_ENABLED=false
+PAYOUT_INTERVAL_MINUTES=360
+TX_DEADLINE_MINUTES=30
+CONFIRMATIONS_REQUIRED=3
+# PAYOUT_ACCOUNT_SEED must NEVER be committed. chmod 600 the real .env.
+PAYOUT_ACCOUNT_SEED=
+
+# --- health ---
+STALL_THRESHOLD_MINUTES=15
+MIN_PEERS=3
+SYNC_LAG_BLOCKS=5
+ALERT_OPEN_AFTER_CHECKS=3
+ALERT_CLOSE_AFTER_CHECKS=3
+
+# --- publishing ---
+TURSO_DATABASE_URL=
+TURSO_AUTH_TOKEN=
+PUBLISH_INTERVAL_SECONDS=30
+STALENESS_THRESHOLD_SECONDS=180
+MAINNET_ACCOUNT_TTL_POSITIVE_SECONDS=86400
+MAINNET_ACCOUNT_TTL_NEGATIVE_SECONDS=3600
+
+# --- storage: must be on the HDD, and the sentinel must exist ---
+DATA_DIR=/mnt/hdd/signum-rewards
+
+# --- notifications: each channel activates only if fully configured ---
+TELEGRAM_BOT_TOKEN=
+TELEGRAM_CHAT_ID=
+DISCORD_WEBHOOK_URL=
+RESEND_API_KEY=
+ALERT_EMAIL_TO=
+
+# --- admin: bind to the LAN interface, NOT 0.0.0.0 ---
+ADMIN_BIND_HOST=192.168.1.50
+ADMIN_PORT=3100
+ADMIN_TOKEN=
+```
+
+- [ ] **Step 4: Remove the scaffold entry point**
+
+```bash
+git rm index.ts
+```
+
+- [ ] **Step 5: Sync the spec with the two deliberate deviations**
+
+In `docs/superpowers/specs/2026-09-05-signum-testnet-rewards-design.md`, update the `.env.example` block in section 7 to the SIGNA-denominated names above, and add to section 1's decision table:
+
+```
+| D9 | Money amounts use `Amount` from `@signumjs/util`; SQLite stores whole planck | Removes planck-vs-SIGNA ambiguity from every signature while keeping SQL SUM() exact |
+| D10 | Repo relicensed MIT → GPL-3.0-or-later | Enables reuse of signum-node's GPL design system in both UIs |
+```
+
+- [ ] **Step 6: Full verification**
+
+```bash
+bun test
+bunx tsc --noEmit
+```
+
+Expected: every test passes and the typecheck is clean. Record the actual counts; do not claim success without reading the output.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add -A
+git commit -m "feat: add composition root, pm2 config and example environment"
+```
+
+---
+
+## Deferred to Phase 2
+
+Not built here, and deliberately so — this plan stops before real money moves:
+
+- `src/payout/broadcast.ts` — multi-out construction, local signing, node-pool broadcast, the single-recipient `sendAmount` fallback, and suggested-fee handling
+- `src/payout/reconcile.ts` — fingerprint matching of un-confirmed batches against the chain, and deadline-driven `failed` transitions
+- `src/payout/scheduler.ts` — the interval trigger, rail evaluation and kill-switch tripping
+- The Vercel status page (`web/`), which is its own plan
+
+Phase 2 should not begin until shadow mode has run against live testnet for a week and the dry-run output has been checked by hand against the chain.
+
+Two Turso tables are created by `config/turso-schema.sql` but deliberately left
+unpopulated in Phase 1, because only the status page consumes them:
+
+- `health_history` — the downsampled sparkline series. `health_samples` is
+  already recorded and pruned locally (Task 17), so the publisher only needs a
+  downsampling query added when the page is built.
+- `payout_recipients` — per-recipient payout detail, which cannot exist until
+  Phase 2 confirms a real batch.
+
+Creating the tables now keeps one schema file authoritative; publishing into them
+belongs to the plan that builds the page that reads them.
