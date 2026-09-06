@@ -13,7 +13,9 @@ import type { StatusResponse } from "@/app/api/status/route";
  */
 export const revalidate = 60;
 
-const STALENESS_SECONDS = Number(process.env.NEXT_PUBLIC_STALENESS_SECONDS ?? 300);
+const STALENESS_SECONDS = Number(
+  process.env.NEXT_PUBLIC_STALENESS_SECONDS ?? 300,
+);
 
 /**
  * The page is a server component that renders real data, then hands it to the
@@ -26,27 +28,15 @@ const STALENESS_SECONDS = Number(process.env.NEXT_PUBLIC_STALENESS_SECONDS ?? 30
 export default async function Page() {
   const result = await readSnapshot();
   const initial: StatusResponse =
-    result.kind === "ok" ? { kind: "ok", snapshot: toWire(result.snapshot) } : result;
+    result.kind === "ok"
+      ? { kind: "ok", snapshot: toWire(result.snapshot) }
+      : result;
 
   return (
-    <main className="page-layout">
-      <header className="pt-2">
-        <h1
-          className="text-lg font-semibold uppercase tracking-[4px]"
-          style={{ color: "var(--blue3)", textShadow: "var(--glow-b)" }}
-        >
-          Signum Testnet Rewards
-        </h1>
-        <p className="text-[10px] uppercase tracking-[2px] text-[var(--muted)]">
-          Forge on testnet · paid in SIGNA on mainnet
-        </p>
-      </header>
-
-      <Dashboard
-        initial={initial}
-        serverNow={Math.floor(Date.now() / 1000)}
-        stalenessSeconds={STALENESS_SECONDS}
-      />
-    </main>
+    <Dashboard
+      initial={initial}
+      serverNow={Math.floor(Date.now() / 1000)}
+      stalenessSeconds={STALENESS_SECONDS}
+    />
   );
 }

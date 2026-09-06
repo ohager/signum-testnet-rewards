@@ -78,3 +78,15 @@ body {
 .table-scroll::-webkit-scrollbar { height: 5px; }
 .table-scroll::-webkit-scrollbar-track { background: transparent; }
 .table-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/*
+ * The stack the page's own content lives in, inside .page-layout below the
+ * masthead. `gap: inherit` takes .page-layout's responsive gap rather than
+ * restating it, so the spacing between cards and the spacing under the header
+ * can never drift apart.
+ */
+.page-stack {
+  display: flex;
+  flex-direction: column;
+  gap: inherit;
+}

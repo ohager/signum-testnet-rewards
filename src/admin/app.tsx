@@ -4,6 +4,7 @@ import {createRoot} from "react-dom/client";
 import {Card, CardLabel, CardSub} from "./components/Card";
 import {Badge, type Tone} from "./components/Badge";
 import {SignaAmount} from "./components/SignaAmount";
+import {SignumLogo} from "./components/SignumLogo";
 
 /** The token is supplied via the URL once, then kept in memory only. */
 const token = new URLSearchParams(location.search).get("token") ?? "";
@@ -315,12 +316,15 @@ function App() {
             className="min-h-screen p-6"
             style={{background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font-body)"}}
         >
-            <h1
-                className="mb-6 text-[18px] uppercase tracking-[6px]"
-                style={{fontFamily: "var(--font-display)", color: "var(--blue2)"}}
-            >
-                Testnet Rewards — Admin
-            </h1>
+            <header className="mb-6 flex items-center gap-3">
+                <SignumLogo size={36} className="shrink-0 text-[var(--blue2)]"/>
+                <h1
+                    className="text-[18px] uppercase tracking-[6px]"
+                    style={{fontFamily: "var(--font-display)", color: "var(--blue2)"}}
+                >
+                    Testnet Rewards — Admin
+                </h1>
+            </header>
 
             {fetchError && (
                 <Card className="mb-4">
