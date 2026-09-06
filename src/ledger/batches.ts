@@ -33,6 +33,8 @@ export interface BatchRow {
   total: Amount | null;
   txId: string | null;
   deadlineAt: number | null;
+  /** Epoch seconds the payout was confirmed on chain; null until it is. */
+  confirmedAt: number | null;
   createdAt: number;
   lastError: string | null;
 }
@@ -145,12 +147,14 @@ function toBatchRow(row: Record<string, unknown>): BatchRow {
     total: totalPlanck === null ? null : fromPlanckInt(totalPlanck),
     txId: (row.tx_id as string | null) ?? null,
     deadlineAt: (row.deadline_at as number | null) ?? null,
+    confirmedAt: (row.confirmed_at as number | null) ?? null,
     createdAt: row.created_at as number,
     lastError: (row.last_error as string | null) ?? null,
   };
 }
 
-const BATCH_COLUMNS = `id, status, recipient_count, total_planck, tx_id, deadline_at, created_at, last_error`;
+const BATCH_COLUMNS =
+  `id, status, recipient_count, total_planck, tx_id, deadline_at, confirmed_at, created_at, last_error`;
 
 export function getBatch(db: Ledger, batchId: number): BatchRow | undefined {
   const row = db
@@ -164,6 +168,18 @@ export function listRecentBatches(db: Ledger, limit: number): BatchRow[] {
     .query(`SELECT ${BATCH_COLUMNS} FROM batches ORDER BY id DESC LIMIT ?1`)
     .all(limit) as Record<string, unknown>[];
   return rows.map(toBatchRow);
+}
+
+/**
+ * When the last batch was claimed, regardless of how it ended.
+ *
+ * A failed batch still marks that the cycle ran, so it anchors the next one:
+ * using only confirmed batches would make a run of failures look like payouts
+ * were overdue by days.
+ */
+export function lastBatchCreatedAt(db: Ledger): number | undefined {
+  const row = db.query(`SELECT MAX(created_at) AS at FROM batches`).get() as { at: number | null };
+  return row.at ?? undefined;
 }
 
 /** Total actually sent today, wall-clock, for the per-day spend rail. */

@@ -28,8 +28,13 @@ const validEnv = (): Record<string, string> => ({
   SYNC_LAG_BLOCKS: "5",
   ALERT_OPEN_AFTER_CHECKS: "3",
   ALERT_CLOSE_AFTER_CHECKS: "3",
+  TESTNET_REFERENCE_NODE_HOSTS: "https://ref-a.example",
+  FORK_CHECK_INTERVAL_SECONDS: "300",
+  FORK_CHECK_DEPTH: "10",
   PUBLISH_INTERVAL_SECONDS: "30",
   STALENESS_THRESHOLD_SECONDS: "180",
+  PUBLISH_FULL_SYNC_MINUTES: "60",
+  RETENTION_DAYS: "30",
   MAINNET_ACCOUNT_TTL_POSITIVE_SECONDS: "86400",
   MAINNET_ACCOUNT_TTL_NEGATIVE_SECONDS: "3600",
   ADMIN_BIND_HOST: "192.168.1.50",
@@ -155,5 +160,54 @@ describe("parseConfig", () => {
     expect(() => parseConfig(env)).toThrow(/TELEGRAM_CHAT_ID/);
     env.TELEGRAM_CHAT_ID = "42";
     expect(parseConfig(env).notify.telegram).toEqual({ botToken: "bot123", chatId: "42" });
+  });
+
+  test("email needs a sender: Resend rejects anything outside a verified domain", () => {
+    const env = validEnv();
+    env.RESEND_API_KEY = "re_key";
+    env.ALERT_EMAIL_TO = "ops@example.dev";
+
+    expect(() => parseConfig(env)).toThrow(/ALERT_EMAIL_FROM/);
+  });
+
+  test("a fully configured email channel defaults to critical only", () => {
+    const env = validEnv();
+    env.RESEND_API_KEY = "re_key";
+    env.ALERT_EMAIL_TO = "ops@example.dev";
+    env.ALERT_EMAIL_FROM = "Rewards <alerts@example.dev>";
+
+    expect(parseConfig(env).notify.email).toEqual({
+      resendApiKey: "re_key",
+      to: "ops@example.dev",
+      from: "Rewards <alerts@example.dev>",
+      minSeverity: "critical",
+    });
+  });
+
+  test("the email severity can be widened to every alert", () => {
+    const env = validEnv();
+    env.RESEND_API_KEY = "re_key";
+    env.ALERT_EMAIL_TO = "ops@example.dev";
+    env.ALERT_EMAIL_FROM = "Rewards <alerts@example.dev>";
+    env.ALERT_EMAIL_MIN_SEVERITY = "WARNING";
+
+    expect(parseConfig(env).notify.email?.minSeverity).toBe("warning");
+  });
+
+  test("A TYPO IN THE SEVERITY IS REJECTED, never silently narrowed", () => {
+    const env = validEnv();
+    env.RESEND_API_KEY = "re_key";
+    env.ALERT_EMAIL_TO = "ops@example.dev";
+    env.ALERT_EMAIL_FROM = "Rewards <alerts@example.dev>";
+    env.ALERT_EMAIL_MIN_SEVERITY = "urgent";
+
+    expect(() => parseConfig(env)).toThrow(/ALERT_EMAIL_MIN_SEVERITY/);
+  });
+
+  test("email stays off when only the sender is set", () => {
+    const env = validEnv();
+    env.ALERT_EMAIL_FROM = "Rewards <alerts@example.dev>";
+
+    expect(parseConfig(env).notify.email).toBeUndefined();
   });
 });

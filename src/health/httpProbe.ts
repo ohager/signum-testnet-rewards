@@ -1,10 +1,12 @@
-import type { TestnetClient } from "../chain/testnetClient.ts";
+import type { TestnetClient, HeadBlock } from "../chain/testnetClient.ts";
 
 export interface ProbeResult {
   httpReachable: boolean;
   localHeight: number | undefined;
   globalHeight: number | undefined;
   peerCount: number | undefined;
+  /** The head block and who forged it. Undefined when the node did not answer. */
+  head: HeadBlock | undefined;
   /** Set when the height advanced since the previous probe. */
   blockAdvancedAtMs: number | undefined;
 }
@@ -36,11 +38,21 @@ export function createHttpProbe(client: TestnetClient, now: () => number = Date.
         peerCount = undefined;
       }
 
+      let head: HeadBlock | undefined;
+      try {
+        head = await client.getHeadBlock(snapshot.lastBlockId);
+      } catch {
+        // Same rule as peers: failing to describe the head block is a missing
+        // detail, not evidence that the node is down. The snapshot succeeded.
+        head = undefined;
+      }
+
       return {
         httpReachable: true,
         localHeight: snapshot.localHeight,
         globalHeight: snapshot.globalHeight,
         peerCount,
+        head,
         blockAdvancedAtMs,
       };
     } catch {
@@ -49,6 +61,7 @@ export function createHttpProbe(client: TestnetClient, now: () => number = Date.
         localHeight: undefined,
         globalHeight: undefined,
         peerCount: undefined,
+        head: undefined,
         blockAdvancedAtMs: undefined,
       };
     }

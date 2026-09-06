@@ -1,137 +1,368 @@
-import { useEffect, useState } from "react";
-import { createRoot } from "react-dom/client";
-import { Card, CardLabel, CardSub } from "./components/Card.tsx";
-import { Badge } from "./components/Badge.tsx";
-import type { Tone } from "./components/Badge.tsx";
-import { SignaAmount } from "./components/SignaAmount.tsx";
+import {useEffect, useState} from "react";
+import {createRoot} from "react-dom/client";
+import {Card, CardLabel, CardSub} from "./components/Card";
+import {Badge, type Tone} from "./components/Badge";
+import {SignaAmount} from "./components/SignaAmount";
 
 /** The token is supplied via the URL once, then kept in memory only. */
 const token = new URLSearchParams(location.search).get("token") ?? "";
 const api = (path: string, init?: RequestInit) =>
-  fetch(`/api/${path}`, { ...init, headers: { "x-admin-token": token } });
+    fetch(`/api/${path}`, {...init, headers: {"x-admin-token": token}});
+
+interface MinerRow {
+    accountId: string;
+    accountRS: string;
+    blocksMined: number;
+    blocksSkipped: number;
+    pendingPlanck: number;
+    paidPlanck: number;
+    lastBlockAt: number | null;
+    lastSkipReason: string | null;
+}
+
+interface StatusRow {
+    payoutsEnabled: boolean;
+    pendingPlanck: number;
+    nextPayoutAt: number | null;
+    payoutBlockedBy: string | null;
+    payoutDue: boolean;
+    lastPayoutAt: number | null;
+    totalDistributedPlanck: number;
+}
+
+interface HeadBlock {
+    height: number;
+    blockId: string;
+    generationSignature: string;
+    generatorId: string;
+    generatorRS: string;
+    forgedAt: number;
+    observedAt: number;
+}
 
 interface State {
-  health: { overall: string; conditions: { kind: string; message: string }[] } | null;
-  openAlerts: { kind: string; severity: string; message: string }[];
-  killSwitchReason: string | null;
-  dryRun: {
-    wouldSend: boolean;
-    totalPlanck: string;
-    recipients: { recipientId: string; planck: string }[];
-    railsVerdict: { ok: boolean; violation?: string; detail?: string };
-  };
+    projection: { status: StatusRow; miners: MinerRow[] };
+    chain: {
+        head: HeadBlock | null;
+        indexed: { height: number; blockId: string; generatorRS: string } | null;
+        blocksBehind: number | null;
+    };
+    health: { overall: string; conditions: { kind: string; message: string }[] } | null;
+    fork: {
+        verdict: string;
+        confirmed: boolean;
+        height: number | null;
+        blockId: string | null;
+        generationSignature: string | null;
+        message: string;
+        agreeing: string[];
+        disagreeing: string[];
+        abstaining: string[];
+    } | null;
+    openAlerts: { kind: string; severity: string; message: string }[];
+    killSwitchReason: string | null;
+    dryRun: {
+        wouldSend: boolean;
+        totalPlanck: string;
+        recipients: { recipientId: string; planck: string }[];
+        railsVerdict: { ok: boolean; violation?: string; detail?: string };
+    };
+}
+
+const BLOCKED_LABEL: Record<string, string> = {
+    disabled: "payouts disabled (shadow mode)",
+    paused: "payouts paused",
+    kill_switch: "kill switch tripped",
+};
+
+const stamp = (epochSeconds: number) => new Date(epochSeconds * 1000).toLocaleString();
+
+/**
+ * The address a person recognises, followed by the id every API and log line
+ * uses. Both are shown because they identify the same account to different
+ * readers, and having to convert between them by hand is the whole friction
+ * this replaces.
+ */
+function AccountId({rs, id}: { rs: string; id: string }) {
+    return (
+        <span>
+            {rs} <span style={{color: "var(--muted)", fontSize: "0.85em"}}>({id})</span>
+        </span>
+    );
+}
+
+/** Signatures and block ids are 64 hex chars; only the ends identify them by eye. */
+const short = (hex: string) => (hex.length > 20 ? `${hex.slice(0, 10)}…${hex.slice(-6)}` : hex);
+
+/**
+ * "in 3h 20m" / "5m ago". Coarse on purpose: the next payout is a schedule, not
+ * a countdown, and second-precision would imply an accuracy the runner has not
+ * promised.
+ */
+function relative(epochSeconds: number, nowSeconds: number): string {
+    const delta = epochSeconds - nowSeconds;
+    const mins = Math.floor(Math.abs(delta) / 60);
+    const text = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
+    return delta >= 0 ? `in ${text}` : `${text} ago`;
 }
 
 const btn: React.CSSProperties = {
-  border: "1px solid var(--border2)",
-  color: "var(--blue2)",
-  background: "var(--surface-tint)",
-  padding: "8px 16px",
-  fontSize: 10,
-  letterSpacing: 2,
-  textTransform: "uppercase",
+    border: "1px solid var(--border2)",
+    color: "var(--blue2)",
+    background: "var(--surface-tint)",
+    padding: "8px 16px",
+    fontSize: 10,
+    letterSpacing: 2,
+    textTransform: "uppercase",
 };
 
 function App() {
-  const [state, setState] = useState<State | undefined>();
-  const [busy, setBusy] = useState(false);
+    const [state, setState] = useState<State | undefined>();
+    const [busy, setBusy] = useState(false);
 
-  const refresh = async () => setState((await (await api("state")).json()) as State);
-  useEffect(() => {
-    void refresh();
-    const t = setInterval(() => void refresh(), 5000);
-    return () => clearInterval(t);
-  }, []);
+    const refresh = async () => setState((await (await api("state")).json()) as State);
+    useEffect(() => {
+        void refresh();
+        const t = setInterval(() => void refresh(), 5000);
+        return () => clearInterval(t);
+    }, []);
 
-  const act = async (path: string) => {
-    setBusy(true);
-    await api(path, { method: "POST" });
-    await refresh();
-    setBusy(false);
-  };
+    const act = async (path: string) => {
+        setBusy(true);
+        await api(path, {method: "POST"});
+        await refresh();
+        setBusy(false);
+    };
 
-  if (!state) return <main className="p-8 text-[var(--muted)]">Loading…</main>;
+    if (!state) return <main className="p-8 text-[var(--muted)]">Loading…</main>;
 
-  const tone: Tone =
-    state.health?.overall === "critical"
-      ? "crit"
-      : state.health?.overall === "warning"
-        ? "warn"
-        : "ok";
+    const {status, miners} = state.projection;
+    const chain = state.chain;
+    const now = Math.floor(Date.now() / 1000);
 
-  return (
-    <main
-      className="min-h-screen p-6"
-      style={{ background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font-body)" }}
-    >
-      <h1
-        className="mb-6 text-[18px] uppercase tracking-[6px]"
-        style={{ fontFamily: "var(--font-display)", color: "var(--blue2)" }}
-      >
-        Testnet Rewards — Admin
-      </h1>
+    const tone: Tone =
+        state.health?.overall === "critical"
+            ? "crit"
+            : state.health?.overall === "warning"
+                ? "warn"
+                : "ok";
 
-      <div className="grid gap-4 md:grid-cols-3">
-        <Card>
-          <CardLabel>Service health</CardLabel>
-          <Badge tone={tone}>{state.health?.overall ?? "unknown"}</Badge>
-          {state.health?.conditions.map((c) => (
-            <CardSub key={c.kind}>{c.message}</CardSub>
-          ))}
-        </Card>
+    // "unknown" is deliberately not an error tone: an unreachable reference node
+    // says nothing about our chain.
+    const forkTone: Tone =
+        state.fork?.verdict === "forked"
+            ? "crit"
+            : state.fork?.verdict === "references_disagree"
+                ? "warn"
+                : "ok";
 
-        <Card>
-          <CardLabel>Kill switch</CardLabel>
-          <Badge tone={state.killSwitchReason ? "crit" : "ok"}>
-            {state.killSwitchReason ? "tripped" : "clear"}
-          </Badge>
-          {state.killSwitchReason && <CardSub>{state.killSwitchReason}</CardSub>}
-        </Card>
+    return (
+        <main
+            className="min-h-screen p-6"
+            style={{background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font-body)"}}
+        >
+            <h1
+                className="mb-6 text-[18px] uppercase tracking-[6px]"
+                style={{fontFamily: "var(--font-display)", color: "var(--blue2)"}}
+            >
+                Testnet Rewards — Admin
+            </h1>
 
-        <Card>
-          <CardLabel>Next batch (dry run)</CardLabel>
-          <p className="text-[26px]" style={{ fontFamily: "var(--font-display)" }}>
-            <SignaAmount planck={state.dryRun.totalPlanck} />
-          </p>
-          <CardSub>
-            {state.dryRun.recipients.length} recipients ·{" "}
-            {state.dryRun.wouldSend ? "would send" : "blocked"}
-          </CardSub>
-          {!state.dryRun.railsVerdict.ok && (
-            <CardSub>
-              rail: {state.dryRun.railsVerdict.violation} — {state.dryRun.railsVerdict.detail}
-            </CardSub>
-          )}
-        </Card>
-      </div>
+            <div className="grid gap-4 md:grid-cols-3">
+                <Card>
+                    <CardLabel>Local chain</CardLabel>
+                    {chain.head ? (
+                        <>
+                            <p className="text-[26px] tabular-nums"
+                               style={{fontFamily: "var(--font-display)"}}>
+                                {chain.head.height.toLocaleString()}
+                            </p>
+                            <CardSub>
+                                forged by{" "}
+                                <AccountId rs={chain.head.generatorRS} id={chain.head.generatorId}/>
+                            </CardSub>
+                            <CardSub>
+                                {relative(chain.head.forgedAt, now)} · block {chain.head.blockId}
+                            </CardSub>
+                            <CardSub>gen sig {short(chain.head.generationSignature)}</CardSub>
+                        </>
+                    ) : (
+                        <>
+                            <Badge tone="warn">unknown</Badge>
+                            <CardSub>the node has not described its head block yet</CardSub>
+                        </>
+                    )}
+                    <CardSub>
+                        {chain.indexed === null
+                            ? "nothing indexed yet"
+                            : `indexed to ${chain.indexed.height.toLocaleString()}` +
+                            (chain.blocksBehind === null ? "" : ` (${chain.blocksBehind} behind)`)}
+                    </CardSub>
+                </Card>
 
-      <div className="mt-6 flex gap-3">
-        <button disabled={busy} onClick={() => void act("pause")} style={btn}>
-          Pause payouts
-        </button>
-        <button disabled={busy} onClick={() => void act("resume")} style={btn}>
-          Resume payouts
-        </button>
-        <button disabled={busy} onClick={() => void act("kill-switch/clear")} style={btn}>
-          Clear kill switch
-        </button>
-      </div>
+                <Card>
+                    <CardLabel>Service health</CardLabel>
+                    <Badge tone={tone}>{state.health?.overall ?? "unknown"}</Badge>
+                    {state.health?.conditions.map((c) => (
+                        <CardSub key={c.kind}>{c.message}</CardSub>
+                    ))}
+                </Card>
 
-      <Card className="mt-6">
-        <CardLabel>Open alerts</CardLabel>
-        {state.openAlerts.length === 0 ? (
-          <CardSub>none</CardSub>
-        ) : (
-          state.openAlerts.map((a) => (
-            <CardSub key={a.kind}>
-              [{a.severity}] {a.kind} — {a.message}
-            </CardSub>
-          ))
-        )}
-      </Card>
-    </main>
-  );
+                <Card>
+                    <CardLabel>Chain fork</CardLabel>
+                    <Badge tone={forkTone}>{state.fork?.verdict ?? "disabled"}</Badge>
+                    <CardSub>
+                        {state.fork
+                            ? state.fork.message
+                            : "No reference nodes configured — chain history is not being compared."}
+                    </CardSub>
+                    {state.fork?.height != null && (
+                        <CardSub>
+                            compared height {state.fork.height.toLocaleString()}
+                            {state.fork.generationSignature
+                                ? ` · gen sig ${short(state.fork.generationSignature)}`
+                                : ""}
+                        </CardSub>
+                    )}
+                    {chain.head && (
+                        <CardSub>
+                            head {chain.head.height.toLocaleString()} · gen sig{" "}
+                            {short(chain.head.generationSignature)}
+                        </CardSub>
+                    )}
+                    {state.fork && state.fork.verdict !== "agreed" && !state.fork.confirmed && (
+                        <CardSub>unconfirmed — awaiting another check</CardSub>
+                    )}
+                </Card>
+
+                <Card>
+                    <CardLabel>Kill switch</CardLabel>
+                    <Badge tone={state.killSwitchReason ? "crit" : "ok"}>
+                        {state.killSwitchReason ? "tripped" : "clear"}
+                    </Badge>
+                    {state.killSwitchReason && <CardSub>{state.killSwitchReason}</CardSub>}
+                </Card>
+
+                <Card>
+                    <CardLabel>Next payout</CardLabel>
+                    {status.nextPayoutAt === null ? (
+                        <>
+                            <Badge tone="warn">none scheduled</Badge>
+                            <CardSub>
+                                {BLOCKED_LABEL[status.payoutBlockedBy ?? ""] ?? "not scheduled"}
+                            </CardSub>
+                        </>
+                    ) : (
+                        <>
+                            <p className="text-[22px]" style={{fontFamily: "var(--font-display)"}}>
+                                {status.payoutDue ? "due now" : relative(status.nextPayoutAt, now)}
+                            </p>
+                            <CardSub>{stamp(status.nextPayoutAt)}</CardSub>
+                        </>
+                    )}
+                    <CardSub>
+                        {status.lastPayoutAt === null
+                            ? "no payout has run yet"
+                            : `last run ${relative(status.lastPayoutAt, now)}`}
+                    </CardSub>
+                </Card>
+
+                <Card>
+                    <CardLabel>Pending to miners</CardLabel>
+                    <p className="text-[26px]" style={{fontFamily: "var(--font-display)"}}>
+                        <SignaAmount planck={String(status.pendingPlanck)}/>
+                    </p>
+                    <CardSub>
+                        across {miners.filter((m) => m.pendingPlanck > 0).length} of {miners.length} miners
+                    </CardSub>
+                </Card>
+
+                <Card>
+                    <CardLabel>Next batch (dry run)</CardLabel>
+                    <p className="text-[26px]" style={{fontFamily: "var(--font-display)"}}>
+                        <SignaAmount planck={state.dryRun.totalPlanck}/>
+                    </p>
+                    <CardSub>
+                        {state.dryRun.recipients.length} recipients ·{" "}
+                        {state.dryRun.wouldSend ? "would send" : "blocked"}
+                    </CardSub>
+                    {!state.dryRun.railsVerdict.ok && (
+                        <CardSub>
+                            rail: {state.dryRun.railsVerdict.violation} — {state.dryRun.railsVerdict.detail}
+                        </CardSub>
+                    )}
+                </Card>
+            </div>
+
+            <div className="mt-6 flex gap-3">
+                <button disabled={busy} onClick={() => void act("pause")} style={btn}>
+                    Pause payouts
+                </button>
+                <button disabled={busy} onClick={() => void act("resume")} style={btn}>
+                    Resume payouts
+                </button>
+                <button disabled={busy} onClick={() => void act("kill-switch/clear")} style={btn}>
+                    Clear kill switch
+                </button>
+            </div>
+
+            <Card className="mt-6">
+                <CardLabel>Miners — pending first</CardLabel>
+                {miners.length === 0 ? (
+                    <CardSub>no blocks observed yet</CardSub>
+                ) : (
+                    <div className="mt-2 max-h-[420px] overflow-y-auto">
+                        <table className="w-full text-[11px] tabular-nums">
+                            <thead>
+                            <tr className="text-left text-[9px] uppercase tracking-[2px] text-[var(--blue2)]">
+                                <th className="py-1 pr-3 font-semibold">Account</th>
+                                <th className="py-1 pr-3 text-right font-semibold">Pending</th>
+                                <th className="py-1 pr-3 text-right font-semibold">Paid</th>
+                                <th className="py-1 pr-3 text-right font-semibold">Blocks</th>
+                                <th className="py-1 pr-3 text-right font-semibold">Skipped</th>
+                                <th className="py-1 font-semibold">Last skip</th>
+                            </tr>
+                            </thead>
+                            <tbody>
+                            {miners.map((m) => (
+                                <tr key={m.accountId} style={{borderTop: "1px solid var(--border)"}}>
+                                    <td className="py-1 pr-3">
+                                        <AccountId rs={m.accountRS} id={m.accountId}/>
+                                    </td>
+                                    <td className="py-1 pr-3 text-right">
+                                        <SignaAmount planck={String(m.pendingPlanck)}/>
+                                    </td>
+                                    <td className="py-1 pr-3 text-right text-[var(--muted)]">
+                                        <SignaAmount planck={String(m.paidPlanck)}/>
+                                    </td>
+                                    <td className="py-1 pr-3 text-right">{m.blocksMined}</td>
+                                    <td className="py-1 pr-3 text-right text-[var(--muted)]">
+                                        {m.blocksSkipped}
+                                    </td>
+                                    <td className="py-1 text-[var(--muted)]">{m.lastSkipReason ?? "—"}</td>
+                                </tr>
+                            ))}
+                            </tbody>
+                        </table>
+                    </div>
+                )}
+            </Card>
+
+            <Card className="mt-6">
+                <CardLabel>Open alerts</CardLabel>
+                {state.openAlerts.length === 0 ? (
+                    <CardSub>none</CardSub>
+                ) : (
+                    state.openAlerts.map((a) => (
+                        <CardSub key={a.kind}>
+                            [{a.severity}] {a.kind} — {a.message}
+                        </CardSub>
+                    ))
+                )}
+            </Card>
+        </main>
+    );
 }
 
 const root = document.getElementById("root");
-if (root) createRoot(root).render(<App />);
+if (root) createRoot(root).render(<App/>);

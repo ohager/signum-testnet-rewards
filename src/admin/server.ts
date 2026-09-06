@@ -3,7 +3,12 @@ import { ChainTime } from "@signumjs/util";
 import type { Ledger } from "../ledger/db.ts";
 import type { RailsConfig } from "../domain/rails.ts";
 import type { HealthAssessment } from "../health/healthState.ts";
+import type { ForkState } from "../health/forkMonitor.ts";
+import type { ChainHead } from "../health/monitor.ts";
+import { lastIndexedBlock } from "../ledger/blockRewards.ts";
+import { toReedSolomon } from "../domain/address.ts";
 import { buildProjection } from "../publish/projection.ts";
+import type { PayoutScheduleOptions } from "../publish/projection.ts";
 import { dryRunBatch } from "../payout/dryRun.ts";
 import type { DryRunReport } from "../payout/dryRun.ts";
 import { toChainDay } from "../domain/chainDay.ts";
@@ -20,7 +25,11 @@ export interface AdminServerDeps {
   minPayout: Amount;
   rails: RailsConfig;
   globalDailyBudget: Amount;
+  payoutSchedule: PayoutScheduleOptions;
   getHealth: () => HealthAssessment | undefined;
+  getChainHead: () => ChainHead | undefined;
+  /** Absent when fork detection is disabled. */
+  getForkState?: () => ForkState | undefined;
 }
 
 export interface AdminServer {
@@ -60,6 +69,59 @@ function serialiseDryRun(report: DryRunReport) {
     })),
     deferredDust: report.deferredDust.map((d) => d.recipientId),
     deferredOverflow: report.deferredOverflow.map((d) => d.recipientId),
+  };
+}
+
+/**
+ * Fork state is reported even when it is "agreed", so the operator can see that
+ * the check is running. A blank panel is indistinguishable from a broken one.
+ */
+function serialiseFork(state: ForkState | undefined) {
+  if (!state) return null;
+  return {
+    verdict: state.comparison.verdict,
+    confirmed: state.confirmed,
+    height: state.comparison.height,
+    // The compared block itself, not just the verdict about it: on a fork these
+    // two values are the evidence, and an operator comparing them against a
+    // block explorer needs to see exactly what our node claimed.
+    blockId: state.comparison.local?.blockId ?? null,
+    generationSignature: state.comparison.local?.generationSignature ?? null,
+    message: state.comparison.message,
+    observedAt: Math.floor(state.observedAtMs / 1000),
+    agreeing: state.comparison.agreeingHosts,
+    disagreeing: state.comparison.disagreeingHosts,
+    abstaining: state.comparison.abstainingHosts,
+  };
+}
+
+/**
+ * The node's head block beside the highest block we have processed.
+ *
+ * Both are reported because they answer different questions: the head says what
+ * the chain is doing, the indexed height says whether this service is keeping up
+ * with it. Showing only one hides a stuck indexer behind a healthy node.
+ */
+function serialiseChain(db: Ledger, head: ChainHead | undefined) {
+  const indexed = lastIndexedBlock(db);
+  return {
+    head: head && {
+      height: head.block.height,
+      blockId: head.block.blockId,
+      generationSignature: head.block.generationSignature,
+      generatorId: head.block.generatorId,
+      generatorRS: head.block.generatorRS,
+      forgedAt: head.block.forgedAt,
+      observedAt: Math.floor(head.observedAtMs / 1000),
+    },
+    indexed: indexed && {
+      height: indexed.height,
+      blockId: indexed.blockId,
+      generatorId: indexed.generatorId,
+      generatorRS: toReedSolomon(indexed.generatorId),
+    },
+    /** Blocks the indexer trails the node by, or null while either is unknown. */
+    blocksBehind: head && indexed ? head.block.height - indexed.height : null,
   };
 }
 
@@ -105,9 +167,12 @@ export function createAdminServer(deps: AdminServerDeps): AdminServer {
             nowEpochSeconds: Math.floor(Date.now() / 1000),
             chainDay: toChainDay(ChainTime.fromDate(new Date()).getChainTimestamp()),
             recentPayoutLimit: 20,
+            payouts: deps.payoutSchedule,
             globalDailyBudget: deps.globalDailyBudget,
           }),
           health: deps.getHealth() ?? null,
+          chain: serialiseChain(deps.db, deps.getChainHead()),
+          fork: serialiseFork(deps.getForkState?.()),
           openAlerts: listOpenAlerts(deps.db),
           killSwitchReason: getKillSwitchReason(deps.db) ?? null,
           dryRun: serialiseDryRun(currentDryRun()),

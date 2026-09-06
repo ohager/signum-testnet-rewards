@@ -1,11 +1,28 @@
 import type { Severity } from "../ledger/alerts.ts";
+import type { ForkVerdict } from "./forkCheck.ts";
 
 export type HealthAlertKind =
   | "node_unreachable"
   | "testnet_stalled"
   | "ws_degraded"
   | "node_out_of_sync"
-  | "low_peers";
+  | "low_peers"
+  | "chain_fork"
+  | "reference_nodes_disagree";
+
+/**
+ * The health loop's view of the fork monitor's latest round.
+ *
+ * `confirmed` and `observedAtMs` are carried deliberately: this loop ticks far
+ * more often than fork checks run, so it must be able to tell a fresh, repeated
+ * verdict from a single stale one it happens to be looking at again.
+ */
+export interface ForkObservation {
+  verdict: ForkVerdict;
+  confirmed: boolean;
+  message: string;
+  observedAtMs: number;
+}
 
 export interface HealthInputs {
   nowMs: number;
@@ -18,6 +35,8 @@ export interface HealthInputs {
   localHeight: number | undefined;
   globalHeight: number | undefined;
   peerCount: number | undefined;
+  /** undefined when fork detection is disabled or has not completed a round yet. */
+  fork: ForkObservation | undefined;
 }
 
 export interface HealthThresholds {
@@ -25,6 +44,8 @@ export interface HealthThresholds {
   stallThresholdMs: number;
   syncLagBlocks: number;
   minPeers: number;
+  /** Beyond this age a fork verdict is treated as unknown rather than current. */
+  forkStateMaxAgeMs: number;
 }
 
 export interface HealthCondition {
@@ -93,6 +114,27 @@ export function assessHealth(
         kind: "node_out_of_sync",
         severity: "warning",
         message: `Local node is ${lag} blocks behind the network`,
+      });
+    }
+  }
+
+  // A fork verdict acts only while it is both confirmed and current. A stale
+  // one means the fork monitor has stopped reporting, which is an observer
+  // problem, and the same rule applies to it as to a dead socket: it raises
+  // nothing about the chain.
+  const fork = inputs.fork;
+  if (
+    fork &&
+    fork.confirmed &&
+    inputs.nowMs - fork.observedAtMs <= thresholds.forkStateMaxAgeMs
+  ) {
+    if (fork.verdict === "forked") {
+      conditions.push({ kind: "chain_fork", severity: "critical", message: fork.message });
+    } else if (fork.verdict === "references_disagree") {
+      conditions.push({
+        kind: "reference_nodes_disagree",
+        severity: "warning",
+        message: fork.message,
       });
     }
   }

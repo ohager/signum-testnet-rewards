@@ -2,6 +2,7 @@ import { Amount } from "@signumjs/util";
 import type { RewardPolicyConfig } from "../domain/policy.ts";
 import type { RailsConfig } from "../domain/rails.ts";
 import { toPlanckInt, MoneyError } from "../domain/money.ts";
+import type { Severity } from "../ledger/alerts.ts";
 
 export class ConfigError extends Error {
   constructor(problems: string[]) {
@@ -21,6 +22,8 @@ export interface AppConfig {
     testnetNodeHost: string;
     testnetWsUrl: string;
     mainnetNodeHosts: string[];
+    /** Empty disables fork detection; the service still indexes, accrues and alerts. */
+    referenceNodeHosts: string[];
     startHeight: number;
     blockOffset: number;
     walkerIntervalSeconds: number;
@@ -38,19 +41,25 @@ export interface AppConfig {
     syncLagBlocks: number;
     alertOpenAfterChecks: number;
     alertCloseAfterChecks: number;
+    forkCheckIntervalSeconds: number;
+    forkCheckDepth: number;
   };
+  /** Rolling window kept in the local ledger. Settled history lives on-chain. */
+  retentionDays: number;
   publish: {
     /** Absent means publishing is disabled; the service still indexes and alerts. */
     turso?: { databaseUrl: string; authToken: string };
     intervalSeconds: number;
     stalenessThresholdSeconds: number;
+    /** How often the whole read-model is rewritten regardless of what changed. */
+    fullSyncMinutes: number;
     accountTtlPositiveSeconds: number;
     accountTtlNegativeSeconds: number;
   };
   notify: {
     telegram?: { botToken: string; chatId: string };
     discord?: { webhookUrl: string };
-    email?: { resendApiKey: string; to: string };
+    email?: { resendApiKey: string; to: string; from: string; minSeverity: Severity };
   };
   admin: { bindHost: string; port: number; token: string };
 }
@@ -183,13 +192,20 @@ export function parseConfig(env: Env): AppConfig {
     );
   }
 
-  const mainnetNodeHosts = (env.MAINNET_NODE_HOSTS ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  const hostList = (raw: string | undefined): string[] =>
+    (raw ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+
+  const mainnetNodeHosts = hostList(env.MAINNET_NODE_HOSTS);
   if (mainnetNodeHosts.length === 0) {
     problems.push("MAINNET_NODE_HOSTS is required (comma separated)");
   }
+
+  // Optional, like Turso publishing: an operator can run the indexer without
+  // reference nodes and simply have no fork detection, rather than not start.
+  const referenceNodeHosts = hostList(env.TESTNET_REFERENCE_NODE_HOSTS);
 
   const payoutsEnabled = bool("PAYOUTS_ENABLED");
   const accountSeed = env.PAYOUT_ACCOUNT_SEED?.trim() || undefined;
@@ -210,7 +226,29 @@ export function parseConfig(env: Env): AppConfig {
     ["RESEND_API_KEY", env.RESEND_API_KEY],
     ["ALERT_EMAIL_TO", env.ALERT_EMAIL_TO],
   );
-  if (mail) notify.email = { resendApiKey: mail[0], to: mail[1] };
+  if (mail) {
+    // Required alongside the pair rather than defaulted: Resend only accepts a
+    // domain verified in the account, so a fallback sender would be a setting
+    // that looks configured and silently fails to deliver.
+    const from = env.ALERT_EMAIL_FROM?.trim();
+    if (!from) problems.push("ALERT_EMAIL_FROM is required to enable email");
+
+    // Unlike the pair, this one has a safe default: email is the channel that
+    // wakes someone up, so it stays critical-only unless asked otherwise. A
+    // typo is still rejected — quietly widening or narrowing who gets paged is
+    // exactly the mistake this catches.
+    const rawSeverity = env.ALERT_EMAIL_MIN_SEVERITY?.trim().toLowerCase();
+    let minSeverity: Severity = "critical";
+    if (rawSeverity === "warning" || rawSeverity === "critical") {
+      minSeverity = rawSeverity;
+    } else if (rawSeverity) {
+      problems.push(
+        `ALERT_EMAIL_MIN_SEVERITY must be "warning" or "critical", got "${rawSeverity}"`,
+      );
+    }
+
+    if (from) notify.email = { resendApiKey: mail[0], to: mail[1], from, minSeverity };
+  }
 
   // Publishing is optional: without it the service still indexes, accrues and
   // alerts, so the indexer can be run and verified without a cloud database.
@@ -231,6 +269,7 @@ export function parseConfig(env: Env): AppConfig {
       testnetNodeHost: str("TESTNET_NODE_HOST"),
       testnetWsUrl: str("TESTNET_WS_URL"),
       mainnetNodeHosts,
+      referenceNodeHosts,
       startHeight: int("START_HEIGHT", { min: 0 }),
       blockOffset: int("BLOCK_OFFSET", { min: 0 }),
       walkerIntervalSeconds: int("WALKER_INTERVAL_SECONDS"),
@@ -248,11 +287,15 @@ export function parseConfig(env: Env): AppConfig {
       syncLagBlocks: int("SYNC_LAG_BLOCKS", { min: 0 }),
       alertOpenAfterChecks: int("ALERT_OPEN_AFTER_CHECKS"),
       alertCloseAfterChecks: int("ALERT_CLOSE_AFTER_CHECKS"),
+      forkCheckIntervalSeconds: int("FORK_CHECK_INTERVAL_SECONDS"),
+      forkCheckDepth: int("FORK_CHECK_DEPTH"),
     },
+    retentionDays: int("RETENTION_DAYS", { min: 1 }),
     publish: {
       turso: turso ? { databaseUrl: turso[0], authToken: turso[1] } : undefined,
       intervalSeconds: int("PUBLISH_INTERVAL_SECONDS"),
       stalenessThresholdSeconds: int("STALENESS_THRESHOLD_SECONDS"),
+      fullSyncMinutes: int("PUBLISH_FULL_SYNC_MINUTES", { min: 1 }),
       accountTtlPositiveSeconds: int("MAINNET_ACCOUNT_TTL_POSITIVE_SECONDS"),
       accountTtlNegativeSeconds: int("MAINNET_ACCOUNT_TTL_NEGATIVE_SECONDS"),
     },

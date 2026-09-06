@@ -91,6 +91,17 @@ CREATE TABLE IF NOT EXISTS service_state (
   updated_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS fork_observations (
+  id             INTEGER PRIMARY KEY,
+  checked_at     INTEGER NOT NULL,
+  height         INTEGER,
+  verdict        TEXT    NOT NULL,
+  local_block_id TEXT,
+  local_gen_sig  TEXT,
+  detail         TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_fork_time ON fork_observations(checked_at);
+
 CREATE VIEW IF NOT EXISTS unpaid_accruals AS
   SELECT * FROM block_rewards WHERE status = 'accrued' AND batch_id IS NULL;
 `;

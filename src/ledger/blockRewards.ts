@@ -114,3 +114,28 @@ export function getLastProcessedHeight(db: Ledger): number | undefined {
   };
   return row.h ?? undefined;
 }
+
+export interface IndexedBlock {
+  height: number;
+  blockId: string;
+  generatorId: string;
+  blockTimestamp: number;
+}
+
+/**
+ * The highest block this service has processed.
+ *
+ * Distinct from the node's head: the indexer deliberately trails by
+ * BLOCK_OFFSET, and the gap between the two is what shows whether it is keeping
+ * up. Reported from the ledger so it stays true even while the node is silent.
+ */
+export function lastIndexedBlock(db: Ledger): IndexedBlock | undefined {
+  const row = db
+    .query(
+      `SELECT height, block_id AS blockId, generator_id AS generatorId,
+              block_timestamp AS blockTimestamp
+         FROM block_rewards ORDER BY height DESC LIMIT 1`,
+    )
+    .get() as IndexedBlock | null;
+  return row ?? undefined;
+}

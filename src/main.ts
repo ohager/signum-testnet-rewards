@@ -8,6 +8,8 @@ import { createIndexer } from "./indexer/indexer.ts";
 import { createWsMonitor } from "./health/wsMonitor.ts";
 import { createHttpProbe } from "./health/httpProbe.ts";
 import { createHealthMonitor } from "./health/monitor.ts";
+import { createForkMonitor } from "./health/forkMonitor.ts";
+import { createBlockProbe, createBlockProbes } from "./chain/blockProbe.ts";
 import { createNotifier } from "./notify/notifier.ts";
 import { createTelegramChannel } from "./notify/telegram.ts";
 import { createDiscordChannel } from "./notify/discord.ts";
@@ -18,11 +20,12 @@ import { createTursoPublisher } from "./publish/tursoPublisher.ts";
 import { createAdminServer } from "./admin/server.ts";
 import { toChainDay } from "./domain/chainDay.ts";
 import { ChainTime } from "@signumjs/util";
-import { pruneHealthSamples } from "./ledger/healthSamples.ts";
+import { pruneLedger } from "./ledger/retention.ts";
 
 // Config validation runs FIRST and throws before anything opens a database.
 // The volume sentinel check lives inside loadConfig for exactly this reason.
 const config = loadConfig();
+const serviceStartedAt = Math.floor(Date.now() / 1000);
 const paths = resolvePaths(config);
 const db = openLedger(paths.databasePath);
 
@@ -67,12 +70,37 @@ console.log(`[boot] notification channels: ${channels.map((c) => c.name).join(",
 
 const notifier = createNotifier({ db, channels });
 const wsMonitor = createWsMonitor(config.chain.testnetWsUrl);
+
+// Fork detection is optional, like publishing: without reference nodes there is
+// nothing to compare our history against, and the service still indexes,
+// accrues and alerts on everything else.
+const referenceProbes = createBlockProbes(config.chain.referenceNodeHosts);
+const forkMonitor =
+  referenceProbes.length > 0
+    ? createForkMonitor({
+        db,
+        local: createBlockProbe(config.chain.testnetNodeHost),
+        references: referenceProbes,
+        depth: config.health.forkCheckDepth,
+        intervalMs: config.health.forkCheckIntervalSeconds * 1000,
+        confirmRounds: config.health.alertOpenAfterChecks,
+      })
+    : undefined;
+console.log(
+  `[boot] fork detection: ${
+    forkMonitor
+      ? `${referenceProbes.length} reference node(s), depth ${config.health.forkCheckDepth}`
+      : "disabled (no reference nodes configured)"
+  }`,
+);
+
 const healthMonitor = createHealthMonitor({
   db,
   config,
   wsMonitor,
   probe: createHttpProbe(testnet),
   intervalMs: 60_000,
+  forkMonitor,
 });
 
 // Publishing is optional: without Turso configured the service still indexes,
@@ -81,9 +109,27 @@ const publisher = config.publish.turso
   ? createTursoPublisher({
       url: config.publish.turso.databaseUrl,
       authToken: config.publish.turso.authToken,
+      // A third of the staleness window: often enough that a consumer watching
+      // `updated_at` never mistakes a quiet service for a dead one, rare enough
+      // that an idle service is not paying for a write every tick.
+      heartbeatSeconds: Math.max(1, Math.floor(config.publish.stalenessThresholdSeconds / 3)),
+      fullSyncSeconds: config.publish.fullSyncMinutes * 60,
+      retentionSeconds: config.retentionDays * 86_400,
     })
   : undefined;
 console.log(`[boot] turso publishing: ${publisher ? "enabled" : "disabled (not configured)"}`);
+
+// Bootstrap the remote read-model tables. Best-effort like every publish: an
+// unreachable Turso must never stop the service from indexing and accruing, and
+// the next publish tick retries the bootstrap on its own.
+if (publisher) {
+  try {
+    await publisher.init();
+    console.log("[boot] turso read-model schema ready");
+  } catch (e) {
+    console.error("[boot] turso schema bootstrap failed:", e instanceof Error ? e.message : e);
+  }
+}
 
 const indexer = createIndexer({
   db,
@@ -102,21 +148,47 @@ const adminServer = createAdminServer({
   minPayout: config.minPayout,
   rails: config.rails,
   globalDailyBudget: config.policy.globalDailyBudget,
+  payoutSchedule: {
+    enabled: config.payouts.enabled,
+    intervalSeconds: config.payouts.intervalMinutes * 60,
+    serviceStartedAt,
+  },
   getHealth: () => healthMonitor.getLatest(),
+  getChainHead: () => healthMonitor.getChainHead(),
+  getForkState: () => forkMonitor?.getState(),
 });
 console.log(`[boot] admin UI on ${adminServer.url}`);
 
 async function publishTick() {
   if (!publisher) return;
   try {
-    await publisher.publish(
+    const outcome = await publisher.publish(
       buildProjection(db, {
         nowEpochSeconds: Math.floor(Date.now() / 1000),
         chainDay: toChainDay(ChainTime.fromDate(new Date()).getChainTimestamp()),
         recentPayoutLimit: 20,
+        // Every row published here is read again on every page view, so the
+        // published view is windowed while the admin panel stays complete.
+        minerActivitySince: Math.floor(Date.now() / 1000) - config.retentionDays * 86_400,
+        payouts: {
+          enabled: config.payouts.enabled,
+          intervalSeconds: config.payouts.intervalMinutes * 60,
+          serviceStartedAt,
+        },
         globalDailyBudget: config.policy.globalDailyBudget,
       }),
     );
+    // Only full syncs are logged: ordinary ticks are usually no-ops now, and a
+    // line per tick would bury everything else.
+    if (outcome.fullSync) {
+      console.log(
+        `[publish] full sync: ${outcome.minersWritten} miner(s), `
+        + `${outcome.payoutsWritten} payout(s)`
+        + (outcome.payoutsDeleted + outcome.minersDeleted > 0
+          ? `, pruned ${outcome.minersDeleted} miner(s) and ${outcome.payoutsDeleted} payout(s)`
+          : ""),
+      );
+    }
   } catch (e) {
     // Best-effort: the next tick republishes from live state, so a failure needs
     // no queue and must never stop indexing.
@@ -125,12 +197,12 @@ async function publishTick() {
 }
 
 healthMonitor.start();
+forkMonitor?.start();
 const publishTimer = setInterval(() => void publishTick(), config.publish.intervalSeconds * 1000);
 const notifyTimer = setInterval(() => void notifier.flush(), 30_000);
-const pruneTimer = setInterval(
-  () => pruneHealthSamples(db, Math.floor(Date.now() / 1000) - 30 * 86_400),
-  6 * 3_600_000,
-);
+const pruneTimer = setInterval(() => {
+  pruneLedger(db, Math.floor(Date.now() / 1000) - config.retentionDays * 86_400);
+}, 6 * 3_600_000);
 
 let shuttingDown = false;
 async function shutdown(signal: string) {
@@ -141,6 +213,7 @@ async function shutdown(signal: string) {
   clearInterval(notifyTimer);
   clearInterval(pruneTimer);
   healthMonitor.stop();
+  forkMonitor?.stop();
   adminServer.stop();
   await indexer.stop();
   publisher?.close();

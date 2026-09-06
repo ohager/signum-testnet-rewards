@@ -3,6 +3,7 @@ import type { Ledger } from "../ledger/db.ts";
 import type { AppConfig } from "../config/schema.ts";
 import type { MainnetAccountFacts } from "../eligibility/eligibility.ts";
 import { createBlockHandler } from "./blockHandler.ts";
+import * as bun from "bun";
 
 export interface IndexerDeps {
   db: Ledger;
@@ -32,6 +33,7 @@ export function createIndexer(deps: IndexerDeps): Indexer {
     cachePath: deps.walkerCachePath,
     intervalSeconds: deps.config.chain.walkerIntervalSeconds,
     blockOffset: deps.config.chain.blockOffset,
+    verbose: true,
   }).onBlock(async (block) => {
     await handler(block);
     deps.onBlockObserved(block.height);
