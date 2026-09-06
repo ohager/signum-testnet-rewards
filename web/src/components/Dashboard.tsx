@@ -5,7 +5,7 @@ import { fromWire } from "@/lib/readModel";
 import type { Miner, Payout, Snapshot, Status } from "@/lib/readModel";
 import type { StatusResponse } from "@/app/api/status/route";
 import { MINER_LIMIT, PAYOUT_LIMIT } from "@/lib/queries";
-import { absoluteTime, formatSigna, relativeTime, shortId } from "@/lib/format";
+import { absoluteTime, countdown, formatSigna, relativeTime, shortId } from "@/lib/format";
 import { useNow } from "@/hooks/useNow";
 import { Card, CardLabel, CardSub } from "@/components/Card";
 import { Badge } from "@/components/Badge";
@@ -225,8 +225,23 @@ const BLOCKER_TEXT: Record<NonNullable<Status["payoutBlockedBy"]>, string> = {
  * `nextPayoutAt` and `payoutBlockedBy` are mutually exclusive by construction in
  * the service, so this shows exactly one of them and never invents a date for a
  * cycle that will not run.
+ *
+ * The wait is rendered as "in 5h 38m" rather than the rounded "in 6 hours" used
+ * elsewhere on the page: this is the one figure a miner is actually waiting on,
+ * and it reads as a schedule at the same precision the operator panel shows.
+ * The last run sits underneath in every branch — including the blocked one,
+ * where "when did this last work" is precisely the question a halted cycle
+ * raises.
  */
 function NextPayout({ status, now }: { status: Status; now: number }) {
+  const lastRun = (
+    <CardSub>
+      {status.lastPayoutAt === null
+        ? "no payout has run yet"
+        : `last payout ${countdown(status.lastPayoutAt, now)}`}
+    </CardSub>
+  );
+
   if (status.payoutBlockedBy) {
     return (
       <>
@@ -234,6 +249,7 @@ function NextPayout({ status, now }: { status: Status; now: number }) {
           none scheduled
         </p>
         <CardSub>{BLOCKER_TEXT[status.payoutBlockedBy]}</CardSub>
+        {lastRun}
       </>
     );
   }
@@ -242,15 +258,17 @@ function NextPayout({ status, now }: { status: Status; now: number }) {
       <>
         <p className="text-lg text-[var(--muted)]">unknown</p>
         <CardSub>no schedule published</CardSub>
+        {lastRun}
       </>
     );
   }
   return (
     <>
       <p className="text-lg" style={{ color: status.payoutDue ? "var(--amber)" : "var(--blue3)" }}>
-        {status.payoutDue ? "due now" : relativeTime(status.nextPayoutAt, now)}
+        {status.payoutDue ? "due now" : countdown(status.nextPayoutAt, now)}
       </p>
       <CardSub>{absoluteTime(status.nextPayoutAt)}</CardSub>
+      {lastRun}
     </>
   );
 }

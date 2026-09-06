@@ -51,3 +51,27 @@ export function absoluteTime(epochSeconds: number): string {
 export function shortId(id: string): string {
   return id.length <= 12 ? id : `${id.slice(0, 6)}…${id.slice(-4)}`;
 }
+
+/**
+ * "in 5h 38m" / "12m ago" from epoch SECONDS.
+ *
+ * Where `relativeTime` rounds to one unit — "in 6 hours" for anything from 5h30
+ * to 6h29 — this keeps the hours AND the minutes, which is what a schedule
+ * needs: a miner waiting on the next cycle wants to know it is 5h 38m away, not
+ * roughly six hours. Still coarse below the minute, because the runner promises
+ * a schedule and not a second-accurate countdown.
+ *
+ * Days are split out so an old timestamp reads as "3d 4h" rather than "76h 12m".
+ */
+export function countdown(epochSeconds: number, nowSeconds: number): string {
+  const delta = epochSeconds - nowSeconds;
+  const minutes = Math.floor(Math.abs(delta) / 60);
+  const hours = Math.floor(minutes / 60);
+  const text =
+    hours >= 24
+      ? `${Math.floor(hours / 24)}d ${hours % 24}h`
+      : hours > 0
+        ? `${hours}h ${minutes % 60}m`
+        : `${minutes}m`;
+  return delta >= 0 ? `in ${text}` : `${text} ago`;
+}
