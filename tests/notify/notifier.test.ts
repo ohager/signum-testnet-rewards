@@ -4,6 +4,7 @@ import type { Ledger } from "../../src/ledger/db.ts";
 import { openAlert, listUnnotifiedAlerts } from "../../src/ledger/alerts.ts";
 import { createNotifier } from "../../src/notify/notifier.ts";
 import type { Channel } from "../../src/notify/channel.ts";
+import type { Logger } from "../../src/log.ts";
 
 let db: Ledger;
 beforeEach(() => { db = openLedger(":memory:"); });
@@ -90,5 +91,73 @@ describe("notifier", () => {
     const a = recorder("telegram");
     await createNotifier({ db, channels: [a.channel] }).flush();
     expect(a.sent).toHaveLength(0);
+  });
+});
+
+describe("notifier logging", () => {
+  interface Line { level: string; message: string; fields?: Record<string, unknown> }
+
+  const recorder = (): { lines: Line[]; log: Logger } => {
+    const lines: Line[] = [];
+    const make = (): Logger => ({
+      debug: (message, fields) => lines.push({ level: "debug", message, fields }),
+      info: (message, fields) => lines.push({ level: "info", message, fields }),
+      warn: (message, fields) => lines.push({ level: "warn", message, fields }),
+      error: (message, fields) => lines.push({ level: "error", message, fields }),
+      child: () => make(),
+    });
+    return { lines, log: make() };
+  };
+
+  const channel = (name: string, minSeverity: "warning" | "critical", send: () => Promise<void>): Channel =>
+    ({ name, minSeverity, send });
+
+  test("A SILENTLY BROKEN CHANNEL IS THE WORST FAILURE MODE: rejections are logged", async () => {
+    openAlert(db, { kind: "low_peers", severity: "warning", message: "3 peers" });
+    const { lines, log } = recorder();
+
+    await createNotifier({
+      db, log,
+      channels: [
+        channel("discord", "warning", async () => { throw new Error("410 Gone"); }),
+        channel("telegram", "warning", async () => {}),
+      ],
+    }).flush();
+
+    const warn = lines.find((l) => l.level === "warn");
+    expect(warn?.fields?.channel).toBe("discord");
+    expect(warn?.fields?.error).toBe("410 Gone");
+    expect(lines.find((l) => l.level === "info")?.fields?.channels).toBe("telegram");
+  });
+
+  test("every channel failing is an error, and the alert stays queued", async () => {
+    openAlert(db, { kind: "chain_fork", severity: "critical", message: "forked" });
+    const { lines, log } = recorder();
+
+    await createNotifier({
+      db, log,
+      channels: [channel("email", "critical", async () => { throw new Error("403"); })],
+    }).flush();
+
+    expect(lines.some((l) => l.level === "error")).toBe(true);
+    expect(listUnnotifiedAlerts(db)).toHaveLength(1);
+  });
+
+  test("AN UNROUTABLE SEVERITY IS CONFIG, NOT AN ERROR: no error every flush", async () => {
+    // Exactly the shipped setup: email is critical-only and is the only channel,
+    // so a warning reaches nobody. Logging that as an error every 30 seconds
+    // would train an operator to ignore the line that actually matters.
+    openAlert(db, { kind: "low_peers", severity: "warning", message: "3 peers" });
+    const { lines, log } = recorder();
+
+    const notifier = createNotifier({
+      db, log,
+      channels: [channel("email", "critical", async () => {})],
+    });
+    await notifier.flush();
+    await notifier.flush();
+
+    expect(lines.every((l) => l.level === "debug")).toBe(true);
+    expect(listUnnotifiedAlerts(db)).toHaveLength(1);
   });
 });

@@ -46,6 +46,8 @@ export interface AppConfig {
   };
   /** Rolling window kept in the local ledger. Settled history lives on-chain. */
   retentionDays: number;
+  /** Debug-level logging for this service AND the chain walker. */
+  verboseLogging: boolean;
   publish: {
     /** Absent means publishing is disabled; the service still indexes and alerts. */
     turso?: { databaseUrl: string; authToken: string };
@@ -291,6 +293,7 @@ export function parseConfig(env: Env): AppConfig {
       forkCheckDepth: int("FORK_CHECK_DEPTH"),
     },
     retentionDays: int("RETENTION_DAYS", { min: 1 }),
+    verboseLogging: bool("VERBOSE_LOGGING"),
     publish: {
       turso: turso ? { databaseUrl: turso[0], authToken: turso[1] } : undefined,
       intervalSeconds: int("PUBLISH_INTERVAL_SECONDS"),

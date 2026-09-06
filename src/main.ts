@@ -1,4 +1,5 @@
 import { loadConfig, resolvePaths } from "./config/load.ts";
+import { createLogger, describeError } from "./log.ts";
 import { openLedger } from "./ledger/db.ts";
 import { createMainnetPool } from "./chain/mainnetPool.ts";
 import { createTestnetClient } from "./chain/testnetClient.ts";
@@ -29,11 +30,16 @@ const serviceStartedAt = Math.floor(Date.now() / 1000);
 const paths = resolvePaths(config);
 const db = openLedger(paths.databasePath);
 
-console.log(`[boot] data dir ${config.dataDir}`);
-console.log(`[boot] payouts ${config.payouts.enabled ? "ENABLED" : "DISABLED (shadow mode)"}`);
-console.log(`[boot] reward ${config.policy.rewardPerBlock.getSigna()} SIGNA/block, `
-  + `cap ${config.policy.accountDailyCap.getSigna()}/account/day, `
-  + `budget ${config.policy.globalDailyBudget.getSigna()}/day`);
+const log = createLogger(config.verboseLogging);
+const boot = log.child("boot");
+
+boot.info("data dir", { path: config.dataDir });
+boot.info(config.payouts.enabled ? "payouts ENABLED" : "payouts disabled (shadow mode)");
+boot.info("reward policy", {
+  perBlockSigna: config.policy.rewardPerBlock.getSigna(),
+  accountDailyCapSigna: config.policy.accountDailyCap.getSigna(),
+  globalDailyBudgetSigna: config.policy.globalDailyBudget.getSigna(),
+});
 
 const mainnet = createMainnetPool(config.chain.mainnetNodeHosts);
 const testnet = createTestnetClient(config.chain.testnetNodeHost);
@@ -66,9 +72,9 @@ const channels: Channel[] = [];
 if (config.notify.telegram) channels.push(createTelegramChannel(config.notify.telegram));
 if (config.notify.discord) channels.push(createDiscordChannel(config.notify.discord));
 if (config.notify.email) channels.push(createEmailChannel(config.notify.email));
-console.log(`[boot] notification channels: ${channels.map((c) => c.name).join(", ") || "none"}`);
+boot.info("notification channels", { channels: channels.map((c) => c.name).join(", ") || "none" });
 
-const notifier = createNotifier({ db, channels });
+const notifier = createNotifier({ db, channels, log: log.child("notify") });
 const wsMonitor = createWsMonitor(config.chain.testnetWsUrl);
 
 // Fork detection is optional, like publishing: without reference nodes there is
@@ -86,13 +92,14 @@ const forkMonitor =
         confirmRounds: config.health.alertOpenAfterChecks,
       })
     : undefined;
-console.log(
-  `[boot] fork detection: ${
-    forkMonitor
-      ? `${referenceProbes.length} reference node(s), depth ${config.health.forkCheckDepth}`
-      : "disabled (no reference nodes configured)"
-  }`,
-);
+if (forkMonitor) {
+  boot.info("fork detection enabled", {
+    referenceNodes: referenceProbes.length,
+    depth: config.health.forkCheckDepth,
+  });
+} else {
+  boot.warn("fork detection disabled: no reference nodes configured");
+}
 
 const healthMonitor = createHealthMonitor({
   db,
@@ -117,7 +124,7 @@ const publisher = config.publish.turso
       retentionSeconds: config.retentionDays * 86_400,
     })
   : undefined;
-console.log(`[boot] turso publishing: ${publisher ? "enabled" : "disabled (not configured)"}`);
+boot.info(publisher ? "turso publishing enabled" : "turso publishing disabled (not configured)");
 
 // Bootstrap the remote read-model tables. Best-effort like every publish: an
 // unreachable Turso must never stop the service from indexing and accruing, and
@@ -125,9 +132,9 @@ console.log(`[boot] turso publishing: ${publisher ? "enabled" : "disabled (not c
 if (publisher) {
   try {
     await publisher.init();
-    console.log("[boot] turso read-model schema ready");
+    boot.info("turso read-model schema ready");
   } catch (e) {
-    console.error("[boot] turso schema bootstrap failed:", e instanceof Error ? e.message : e);
+    boot.error("turso schema bootstrap failed", { error: describeError(e) });
   }
 }
 
@@ -157,7 +164,9 @@ const adminServer = createAdminServer({
   getChainHead: () => healthMonitor.getChainHead(),
   getForkState: () => forkMonitor?.getState(),
 });
-console.log(`[boot] admin UI on ${adminServer.url}`);
+boot.info("admin UI listening", { url: adminServer.url });
+
+const publishLog = log.child("publish");
 
 async function publishTick() {
   if (!publisher) return;
@@ -181,18 +190,23 @@ async function publishTick() {
     // Only full syncs are logged: ordinary ticks are usually no-ops now, and a
     // line per tick would bury everything else.
     if (outcome.fullSync) {
-      console.log(
-        `[publish] full sync: ${outcome.minersWritten} miner(s), `
-        + `${outcome.payoutsWritten} payout(s)`
-        + (outcome.payoutsDeleted + outcome.minersDeleted > 0
-          ? `, pruned ${outcome.minersDeleted} miner(s) and ${outcome.payoutsDeleted} payout(s)`
-          : ""),
-      );
+      publishLog.info("full sync", {
+        miners: outcome.minersWritten,
+        payouts: outcome.payoutsWritten,
+        minersPruned: outcome.minersDeleted,
+        payoutsPruned: outcome.payoutsDeleted,
+      });
+    } else if (!outcome.skipped) {
+      publishLog.debug("published", {
+        status: outcome.statusWritten,
+        miners: outcome.minersWritten,
+        payouts: outcome.payoutsWritten,
+      });
     }
   } catch (e) {
     // Best-effort: the next tick republishes from live state, so a failure needs
     // no queue and must never stop indexing.
-    console.error("[publish] failed:", e instanceof Error ? e.message : e);
+    publishLog.error("failed", { error: describeError(e) });
   }
 }
 
@@ -201,14 +215,15 @@ forkMonitor?.start();
 const publishTimer = setInterval(() => void publishTick(), config.publish.intervalSeconds * 1000);
 const notifyTimer = setInterval(() => void notifier.flush(), 30_000);
 const pruneTimer = setInterval(() => {
-  pruneLedger(db, Math.floor(Date.now() / 1000) - config.retentionDays * 86_400);
+  const dropped = pruneLedger(db, Math.floor(Date.now() / 1000) - config.retentionDays * 86_400);
+  log.child("retention").debug("pruned local ledger", { ...dropped });
 }, 6 * 3_600_000);
 
 let shuttingDown = false;
 async function shutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`[shutdown] ${signal}`);
+  log.child("shutdown").info(signal);
   clearInterval(publishTimer);
   clearInterval(notifyTimer);
   clearInterval(pruneTimer);
