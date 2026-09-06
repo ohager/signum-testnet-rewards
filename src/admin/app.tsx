@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Card, CardLabel, CardSub } from "../ui/components/Card.tsx";
-import { Badge } from "../ui/components/Badge.tsx";
-import type { Tone } from "../ui/components/Badge.tsx";
-import { SignaAmount } from "../ui/components/SignaAmount.tsx";
+import { Card, CardLabel, CardSub } from "./components/Card.tsx";
+import { Badge } from "./components/Badge.tsx";
+import type { Tone } from "./components/Badge.tsx";
+import { SignaAmount } from "./components/SignaAmount.tsx";
 
 /** The token is supplied via the URL once, then kept in memory only. */
 const token = new URLSearchParams(location.search).get("token") ?? "";
