@@ -1,0 +1,11 @@
+signum-testnet-rewards
+Copyright (C) 2026 ohager
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See LICENSE for the full text.
+
+Relicensed from MIT to GPL-3.0-or-later so that design system code may be
+shared with signum-node (https://github.com/signum-network/signum-node), which
+is GPL-3.0 licensed.

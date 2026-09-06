@@ -1,0 +1,35 @@
+{
+  "name": "signum-testnet-rewards",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "scripts": {
+    "start": "bun run src/main.ts",
+    "dev": "bun --hot src/main.ts",
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "bun-plugin-tailwind": "^0.1.2",
+    "tailwindcss": "^4.3.3"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "@signumjs/core": "^3.3.4",
+    "@signumjs/crypto": "^3.3.4",
+    "@signumjs/util": "^3.3.4",
+    "framer-motion": "^13.2.0",
+    "pino": "^8.21.0",
+    "pino-pretty": "^10.3.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "signum-chain-walker": "^1.0.8"
+  }
+}
