@@ -11,6 +11,7 @@ import { Card, CardLabel, CardSub } from "@/components/Card";
 import { Badge } from "@/components/Badge";
 import type { Tone } from "@/components/Badge";
 import { SignaAmount } from "@/components/SignaAmount";
+import { RewardRules } from "@/components/RewardRules";
 
 /**
  * Matches the publisher's tick and the API route's cache window. Polling faster
@@ -82,6 +83,7 @@ export function Dashboard({ initial, serverNow, stalenessSeconds }: DashboardPro
     <>
       <ServiceBanner status={status} stale={stale} offline={Boolean(error)} now={now} />
       <Headline status={status} now={now} />
+      <RewardRules status={status} />
       <MinerTable miners={miners} status={status} now={now} />
       <PayoutTable payouts={payouts} now={now} />
       <Footnote status={status} now={now} />
@@ -273,11 +275,30 @@ function NextPayout({ status, now }: { status: Status; now: number }) {
   );
 }
 
+/**
+ * Why a miner's most recent block earned nothing, in the words the rules card
+ * uses. Keyed by the service's `BlockRewardStatus`.
+ *
+ * A status this page does not recognise renders no reason at all rather than a
+ * raw enum: the count is already on screen and the rules explain the causes, so
+ * an unknown value costs a detail rather than the row.
+ */
+const SKIP_REASON: Record<string, string> = {
+  skipped_account_cap: "daily cap reached",
+  skipped_global_cap: "daily budget spent",
+  skipped_no_mainnet_account: "no mainnet account",
+  skipped_pubkey_mismatch: "public key mismatch",
+  skipped_excluded: "account excluded",
+};
+
 const MAINNET_BADGE: Record<Miner["mainnetAccount"], { tone: Tone; text: string }> = {
   active: { tone: "ok", text: "payable" },
   inactive: { tone: "warn", text: "no mainnet acct" },
   unknown: { tone: "muted", text: "unchecked" },
 };
+
+const skipReason = (status: string | null): string | undefined =>
+  status === null ? undefined : SKIP_REASON[status];
 
 function MinerTable({ miners, status, now }: { miners: Miner[]; status: Status; now: number }) {
   const unpayable = miners.filter((m) => m.mainnetAccount === "inactive").length;
@@ -303,6 +324,7 @@ function MinerTable({ miners, status, now }: { miners: Miner[]; status: Status; 
             <tbody>
               {miners.map((m) => {
                 const badge = MAINNET_BADGE[m.mainnetAccount];
+                const reason = skipReason(m.lastSkipReason);
                 return (
                   <tr key={m.accountId} style={{ borderTop: "1px solid var(--border)" }}>
                     <td className="py-2 pr-4">
@@ -315,7 +337,18 @@ function MinerTable({ miners, status, now }: { miners: Miner[]; status: Status; 
                     <td className="py-2 pr-4 text-right tabular-nums">
                       {m.blocksMined}
                       {m.blocksSkipped > 0 && (
-                        <span className="text-[var(--muted)]"> +{m.blocksSkipped} skipped</span>
+                        <>
+                          <span className="text-[var(--muted)]"> +{m.blocksSkipped} skipped</span>
+                          {/* The reason for the LATEST skip, which is why it is
+                              worded as one rather than as a verdict on all of
+                              them: a miner who fixes their mainnet account
+                              keeps the old skips but stops adding to them. */}
+                          {reason && (
+                            <span className="block text-[10px] text-[var(--amber)]">
+                              last: {reason}
+                            </span>
+                          )}
+                        </>
                       )}
                     </td>
                     <td className="py-2 pr-4 text-right" style={{ color: "var(--gold)" }}>
@@ -339,8 +372,11 @@ function MinerTable({ miners, status, now }: { miners: Miner[]; status: Status; 
           ? `Showing ${miners.length} of ${status.minerCount} miners. `
           : ""}
         {unpayable > 0
-          ? `${unpayable} shown here forge but have no active mainnet account, so they cannot be paid until they create one.`
-          : "Rewards are paid to the same account id on mainnet, which must exist and have a public key set."}
+          ? `${unpayable} shown here forge but have no active mainnet account, so they cannot be paid until they create one. `
+          : ""}
+        Blocks counts what a miner was rewarded for; skipped blocks were forged but earned
+        nothing, almost always because that account had already reached its cap for the day.
+        See the rules above.
       </CardSub>
     </Card>
   );

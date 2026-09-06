@@ -56,6 +56,7 @@ const statusFingerprint = (s: StatusRow): string =>
   JSON.stringify([
     s.payoutsEnabled, s.payoutsPaused, s.killSwitch,
     s.budgetRemainingPlanck, s.spentTodayPlanck, s.totalDistributedPlanck, s.pendingPlanck,
+    s.rewardPerBlockPlanck, s.accountDailyCapPlanck, s.globalDailyBudgetPlanck, s.minPayoutPlanck,
     s.minerCount,
     s.nextPayoutAt, s.payoutBlockedBy, s.payoutDue, s.lastPayoutAt,
     s.openAlerts,

@@ -285,7 +285,7 @@ const adminServer = createAdminServer({
   port: config.admin.port,
   minPayout: config.minPayout,
   rails: config.rails,
-  globalDailyBudget: config.policy.globalDailyBudget,
+  policy: config.policy,
   payoutSchedule: {
     enabled: config.payouts.enabled,
     intervalSeconds: config.payouts.intervalMinutes * 60,
@@ -330,7 +330,8 @@ async function publishTick() {
           intervalSeconds: config.payouts.intervalMinutes * 60,
           serviceStartedAt,
         },
-        globalDailyBudget: config.policy.globalDailyBudget,
+        policy: config.policy,
+        minPayout: config.minPayout,
       }),
     );
     // Only full syncs are logged: ordinary ticks are usually no-ops now, and a

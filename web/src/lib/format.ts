@@ -75,3 +75,16 @@ export function countdown(epochSeconds: number, nowSeconds: number): string {
         : `${minutes}m`;
   return delta >= 0 ? `in ${text}` : `${text} ago`;
 }
+
+/**
+ * Formats planck as SIGNA for prose: "1", "10", "0.5".
+ *
+ * Where `formatSigna` pads to a fixed width so figures line up down a column,
+ * this trims trailing zeros. A rule reads as a rule — "1 SIGNA a block" — while
+ * "1.00 SIGNA a block" reads as a measurement of something that varies.
+ */
+export function formatSignaPlain(planck: bigint): string {
+  const { whole, fraction } = formatSigna(planck, 8);
+  const trimmed = fraction.replace(/0+$/, "");
+  return trimmed ? `${whole}.${trimmed}` : whole;
+}

@@ -11,6 +11,10 @@ import { toReedSolomon } from "../domain/address.ts";
 import { lastBatchCreatedAt } from "../ledger/batches.ts";
 import { computePayoutSchedule } from "../payout/schedule.ts";
 import type { PayoutBlocker } from "../payout/schedule.ts";
+import type { RewardPolicyConfig } from "../domain/policy.ts";
+
+const planckOrNull = (amount: Amount | undefined): number | null =>
+  amount === undefined ? null : toPlanckInt(amount);
 
 const toEpochSeconds = (chainTimestamp: number): number =>
   Math.floor(ChainTime.fromChainTimestamp(chainTimestamp).getDate().getTime() / 1000);
@@ -56,6 +60,22 @@ export interface StatusRow {
    * when no ceiling is configured.
    */
   spentTodayPlanck: number;
+  /**
+   * The rules a block is judged against, republished with every status row.
+   *
+   * Carried here rather than left to the reader's imagination because the
+   * figures they explain are otherwise unreadable: a miner who sees 10 rewarded
+   * blocks and 122 skipped ones can only make sense of that pair once they know
+   * the per-block reward and the daily cap that stopped the eleventh.
+   *
+   * Null when the caller publishes no rules, which is a different statement
+   * from a rule of zero — see `budgetRemainingPlanck`.
+   */
+  rewardPerBlockPlanck: number | null;
+  accountDailyCapPlanck: number | null;
+  globalDailyBudgetPlanck: number | null;
+  /** Below this an accrual waits for a later batch rather than being sent. */
+  minPayoutPlanck: number | null;
   totalDistributedPlanck: number;
   /** Total still owed to miners across every account. */
   pendingPlanck: number;
@@ -111,8 +131,14 @@ export interface ProjectionOptions {
    * real cutoff, because every row there is read again on every page view.
    */
   minerActivitySince?: number;
-  /** Absent means the deployment sets no daily ceiling, published as unlimited. */
-  globalDailyBudget?: Amount;
+  /**
+   * The reward rules in force. Absent means none are published: the daily
+   * ceiling then shows as unlimited and the public page explains the programme
+   * without quoting figures it was not given.
+   */
+  policy?: RewardPolicyConfig;
+  /** The dust threshold a batch composes against. Published alongside `policy`. */
+  minPayout?: Amount;
 }
 
 /**
@@ -204,10 +230,11 @@ export function buildProjection(db: Ledger, opts: ProjectionOptions): Projection
   // allowance is not something anyone can act on, and it would render as a
   // headline figure implying the programme owes the budget money.
   const spentToday = sumAccruedGlobalOnDay(db, opts.chainDay);
+  const globalDailyBudget = opts.policy?.globalDailyBudget;
   const budgetRemainingPlanck =
-    opts.globalDailyBudget === undefined
+    globalDailyBudget === undefined
       ? null
-      : Math.max(0, toPlanckInt(opts.globalDailyBudget.clone().subtract(spentToday)));
+      : Math.max(0, toPlanckInt(globalDailyBudget.clone().subtract(spentToday)));
 
   const payouts: PayoutRow[] = listRecentBatches(db, opts.recentPayoutLimit)
     .filter((b) => b.status === "confirmed")
@@ -227,6 +254,10 @@ export function buildProjection(db: Ledger, opts: ProjectionOptions): Projection
       killSwitch: isKillSwitchTripped(db),
       budgetRemainingPlanck,
       spentTodayPlanck: toPlanckInt(spentToday),
+      rewardPerBlockPlanck: planckOrNull(opts.policy?.rewardPerBlock),
+      accountDailyCapPlanck: planckOrNull(opts.policy?.accountDailyCap),
+      globalDailyBudgetPlanck: planckOrNull(globalDailyBudget),
+      minPayoutPlanck: planckOrNull(opts.minPayout),
       totalDistributedPlanck,
       pendingPlanck,
       minerCount: miners.length,

@@ -13,6 +13,10 @@ const projection = (over: Partial<Projection> = {}): Projection => ({
     payoutsPaused: false,
     killSwitch: false,
     budgetRemainingPlanck: 100_000_000,
+    rewardPerBlockPlanck: 100_000_000,
+    accountDailyCapPlanck: 1_000_000_000,
+    globalDailyBudgetPlanck: 25_000_000_000,
+    minPayoutPlanck: 500_000_000,
     spentTodayPlanck: 150_000_000,
     totalDistributedPlanck: 250_000_000,
     pendingPlanck: 750_000_000,
@@ -101,6 +105,17 @@ describe("planPublish", () => {
     const state = settled();
     const next = projection();
     next.status.spentTodayPlanck = 900_000_000;
+
+    const { plan } = planPublish(next, state, { ...OPTS, nowSeconds: NOW + 5 });
+    expect(plan.writeStatus).toBe(true);
+  });
+
+  // An operator raising the cap changes what every future block earns. The page
+  // states that figure, so it must not sit on the old one until the heartbeat.
+  test("a re-tuned reward rule is a change", () => {
+    const state = settled();
+    const next = projection();
+    next.status.accountDailyCapPlanck = 2_000_000_000;
 
     const { plan } = planPublish(next, state, { ...OPTS, nowSeconds: NOW + 5 });
     expect(plan.writeStatus).toBe(true);

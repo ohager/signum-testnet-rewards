@@ -132,11 +132,13 @@ export function createTursoPublisher(cfg: PublisherConfig): Publisher {
         {
           sql: `INSERT INTO status (id, updated_at, service_status, payouts_enabled,
                                     payouts_paused, kill_switch, budget_remaining_planck,
-                                    spent_today_planck,
+                                    spent_today_planck, reward_per_block_planck,
+                                    account_daily_cap_planck, global_daily_budget_planck,
+                                    min_payout_planck,
                                     total_distributed_planck, pending_planck, miner_count,
                                     next_payout_at,
                                     payout_blocked_by, payout_due, last_payout_at, open_alerts)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   updated_at               = excluded.updated_at,
                   service_status           = excluded.service_status,
@@ -145,6 +147,10 @@ export function createTursoPublisher(cfg: PublisherConfig): Publisher {
                   kill_switch              = excluded.kill_switch,
                   budget_remaining_planck  = excluded.budget_remaining_planck,
                   spent_today_planck       = excluded.spent_today_planck,
+                  reward_per_block_planck  = excluded.reward_per_block_planck,
+                  account_daily_cap_planck = excluded.account_daily_cap_planck,
+                  global_daily_budget_planck = excluded.global_daily_budget_planck,
+                  min_payout_planck        = excluded.min_payout_planck,
                   total_distributed_planck = excluded.total_distributed_planck,
                   pending_planck           = excluded.pending_planck,
                   miner_count              = excluded.miner_count,
@@ -161,6 +167,10 @@ export function createTursoPublisher(cfg: PublisherConfig): Publisher {
             projection.status.killSwitch ? 1 : 0,
             projection.status.budgetRemainingPlanck,
             projection.status.spentTodayPlanck,
+            projection.status.rewardPerBlockPlanck,
+            projection.status.accountDailyCapPlanck,
+            projection.status.globalDailyBudgetPlanck,
+            projection.status.minPayoutPlanck,
             projection.status.totalDistributedPlanck,
             projection.status.pendingPlanck,
             projection.status.minerCount,

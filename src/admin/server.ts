@@ -2,6 +2,7 @@ import type { Amount } from "@signumjs/util";
 import { ChainTime } from "@signumjs/util";
 import type { Ledger } from "../ledger/db.ts";
 import type { RailsConfig } from "../domain/rails.ts";
+import type { RewardPolicyConfig } from "../domain/policy.ts";
 import type { HealthAssessment } from "../health/healthState.ts";
 import type { ForkState } from "../health/forkMonitor.ts";
 import type { ChainHead } from "../health/monitor.ts";
@@ -32,7 +33,8 @@ export interface AdminServerDeps {
   port: number;
   minPayout: Amount;
   rails: RailsConfig;
-  globalDailyBudget: Amount;
+  /** The reward rules in force, shown on the panel and published to the site. */
+  policy: RewardPolicyConfig;
   payoutSchedule: PayoutScheduleOptions;
   getHealth: () => HealthAssessment | undefined;
   getChainHead: () => ChainHead | undefined;
@@ -248,7 +250,8 @@ export function createAdminServer(deps: AdminServerDeps): AdminServer {
             chainDay: toChainDay(ChainTime.fromDate(new Date()).getChainTimestamp()),
             recentPayoutLimit: 20,
             payouts: deps.payoutSchedule,
-            globalDailyBudget: deps.globalDailyBudget,
+            policy: deps.policy,
+            minPayout: deps.minPayout,
           }),
           health: deps.getHealth() ?? null,
           chain: serialiseChain(deps.db, deps.getChainHead()),

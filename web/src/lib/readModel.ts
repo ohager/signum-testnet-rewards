@@ -46,6 +46,16 @@ export interface Status {
    * to the remainder so the two cards read as one sentence.
    */
   spentTodayPlanck: bigint;
+  /**
+   * The rules a forged block is judged against, as the service has them
+   * configured right now. Null when the service publishes none, in which case
+   * the page explains the programme without quoting a figure it was not given.
+   */
+  rewardPerBlockPlanck: bigint | null;
+  accountDailyCapPlanck: bigint | null;
+  globalDailyBudgetPlanck: bigint | null;
+  /** Below this an accrual rolls over to a later batch instead of being sent. */
+  minPayoutPlanck: bigint | null;
   totalDistributedPlanck: bigint;
   /** Total still owed across every miner. */
   pendingPlanck: bigint;
@@ -97,6 +107,10 @@ export const READ_MODEL_COLUMNS = {
     "kill_switch",
     "budget_remaining_planck",
     "spent_today_planck",
+    "reward_per_block_planck",
+    "account_daily_cap_planck",
+    "global_daily_budget_planck",
+    "min_payout_planck",
     "total_distributed_planck",
     "pending_planck",
     "miner_count",
@@ -146,6 +160,10 @@ export function decodeStatus(row: Row): Status {
     killSwitch: bool(row.kill_switch),
     budgetRemainingPlanck: nullablePlanck(row.budget_remaining_planck),
     spentTodayPlanck: planck(row.spent_today_planck),
+    rewardPerBlockPlanck: nullablePlanck(row.reward_per_block_planck),
+    accountDailyCapPlanck: nullablePlanck(row.account_daily_cap_planck),
+    globalDailyBudgetPlanck: nullablePlanck(row.global_daily_budget_planck),
+    minPayoutPlanck: nullablePlanck(row.min_payout_planck),
     totalDistributedPlanck: planck(row.total_distributed_planck),
     pendingPlanck: planck(row.pending_planck),
     minerCount: int(row.miner_count),
@@ -218,6 +236,9 @@ export interface SnapshotWire {
   payouts: PayoutWire[];
 }
 
+const nullableToWire = (v: bigint | null): string | null => (v === null ? null : v.toString());
+const nullableFromWire = (v: string | null): bigint | null => (v === null ? null : BigInt(v));
+
 export function toWire(snapshot: Snapshot): SnapshotWire {
   return {
     status: {
@@ -227,6 +248,10 @@ export function toWire(snapshot: Snapshot): SnapshotWire {
           ? null
           : snapshot.status.budgetRemainingPlanck.toString(),
       spentTodayPlanck: snapshot.status.spentTodayPlanck.toString(),
+      rewardPerBlockPlanck: nullableToWire(snapshot.status.rewardPerBlockPlanck),
+      accountDailyCapPlanck: nullableToWire(snapshot.status.accountDailyCapPlanck),
+      globalDailyBudgetPlanck: nullableToWire(snapshot.status.globalDailyBudgetPlanck),
+      minPayoutPlanck: nullableToWire(snapshot.status.minPayoutPlanck),
       totalDistributedPlanck: snapshot.status.totalDistributedPlanck.toString(),
       pendingPlanck: snapshot.status.pendingPlanck.toString(),
     },
@@ -251,6 +276,10 @@ export function fromWire(wire: SnapshotWire): Snapshot {
           ? null
           : BigInt(wire.status.budgetRemainingPlanck),
       spentTodayPlanck: BigInt(wire.status.spentTodayPlanck),
+      rewardPerBlockPlanck: nullableFromWire(wire.status.rewardPerBlockPlanck),
+      accountDailyCapPlanck: nullableFromWire(wire.status.accountDailyCapPlanck),
+      globalDailyBudgetPlanck: nullableFromWire(wire.status.globalDailyBudgetPlanck),
+      minPayoutPlanck: nullableFromWire(wire.status.minPayoutPlanck),
       totalDistributedPlanck: BigInt(wire.status.totalDistributedPlanck),
       pendingPlanck: BigInt(wire.status.pendingPlanck),
     },

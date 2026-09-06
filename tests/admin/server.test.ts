@@ -22,6 +22,11 @@ let sent: string[];
 let sendFails: boolean;
 let simulationResult: PayoutSimulation;
 const TOKEN = "test-token";
+const TEST_POLICY = {
+  rewardPerBlock: Amount.fromSigna("1"),
+  accountDailyCap: Amount.fromSigna("10"),
+  globalDailyBudget: Amount.fromSigna("1000"),
+};
 
 beforeEach(() => {
   db = openLedger(":memory:");
@@ -67,7 +72,7 @@ beforeEach(() => {
       maxPerBatch: Amount.fromSigna("2000"),
       maxPerWallClockDay: Amount.fromSigna("3000"),
     },
-    globalDailyBudget: Amount.fromSigna("1000"),
+    policy: TEST_POLICY,
     payoutSchedule: { enabled: false, intervalSeconds: 6 * 3_600, serviceStartedAt: 1_800_000_000 },
     getHealth: () => undefined,
     getChainHead: () => chainHead,
@@ -331,7 +336,7 @@ describe("admin server routes", () => {
         maxPerBatch: Amount.fromSigna("2000"),
         maxPerWallClockDay: Amount.fromSigna("3000"),
       },
-      globalDailyBudget: Amount.fromSigna("1000"),
+      policy: TEST_POLICY,
       payoutSchedule: { enabled: false, intervalSeconds: 6 * 3_600, serviceStartedAt: 1_800_000_000 },
       getHealth: () => { throw new Error("secret internal detail"); },
       getChainHead: () => undefined,
@@ -356,7 +361,7 @@ describe("admin server routes", () => {
         maxPerBatch: Amount.fromSigna("2000"),
         maxPerWallClockDay: Amount.fromSigna("3000"),
       },
-      globalDailyBudget: Amount.fromSigna("1000"),
+      policy: TEST_POLICY,
       payoutSchedule: { enabled: false, intervalSeconds: 6 * 3_600, serviceStartedAt: 1_800_000_000 },
       getHealth: () => undefined,
       getChainHead: () => undefined,
@@ -381,7 +386,7 @@ describe("admin server routes", () => {
         maxPerBatch: Amount.fromSigna("2000"),
         maxPerWallClockDay: Amount.fromSigna("3000"),
       },
-      globalDailyBudget: Amount.fromSigna("1000"),
+      policy: TEST_POLICY,
       payoutSchedule: { enabled: false, intervalSeconds: 6 * 3_600, serviceStartedAt: 1_800_000_000 },
       getHealth: () => undefined,
       getChainHead: () => undefined,
@@ -414,7 +419,7 @@ describe("admin server payout account", () => {
         maxPerBatch: Amount.fromSigna("2000"),
         maxPerWallClockDay: Amount.fromSigna("3000"),
       },
-      globalDailyBudget: Amount.fromSigna("1000"),
+      policy: TEST_POLICY,
       payoutSchedule: { enabled: false, intervalSeconds: 6 * 3_600, serviceStartedAt: 1_800_000_000 },
       getHealth: () => undefined,
       getChainHead: () => undefined,
@@ -480,7 +485,7 @@ describe("admin server payout release", () => {
         maxPerBatch: Amount.fromSigna("2000"),
         maxPerWallClockDay: Amount.fromSigna("3000"),
       },
-      globalDailyBudget: Amount.fromSigna("1000"),
+      policy: TEST_POLICY,
       payoutSchedule: { enabled: false, intervalSeconds: 6 * 3_600, serviceStartedAt: 1_800_000_000 },
       getHealth: () => undefined,
       getChainHead: () => undefined,

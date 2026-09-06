@@ -29,6 +29,13 @@ const payouts = {
   serviceStartedAt: 1_800_000_000 - 3_600,
 };
 
+/** The reward rules, as the service passes them in. Budget varies per test. */
+const policyWith = (budgetSigna: string) => ({
+  rewardPerBlock: Amount.fromSigna("1"),
+  accountDailyCap: Amount.fromSigna("10"),
+  globalDailyBudget: Amount.fromSigna(budgetSigna),
+});
+
 const opts = {
   nowEpochSeconds: 1_800_000_000,
   chainDay: "2026-03-14",
@@ -67,7 +74,7 @@ describe("buildProjection", () => {
   test("reports today's remaining budget", () => {
     accrue("b1", "acct-1", "2.5");
     const projection = buildProjection(db, {
-      ...opts, globalDailyBudget: Amount.fromSigna("1000"),
+      ...opts, policy: policyWith("1000"),
     });
     expect(projection.status.budgetRemainingPlanck).toBe(99_750_000_000);
   });
@@ -78,7 +85,7 @@ describe("buildProjection", () => {
     accrue("b1", "acct-1", "2.5");
     accrue("b2", "acct-2", "2.5");
     const projection = buildProjection(db, {
-      ...opts, globalDailyBudget: Amount.fromSigna("1"),
+      ...opts, policy: policyWith("1"),
     });
     expect(projection.status.budgetRemainingPlanck).toBe(0);
   });
@@ -94,7 +101,7 @@ describe("buildProjection", () => {
     accrue("b1", "acct-1", "2.5");
     accrue("b2", "acct-2", "2.5");
     const status = buildProjection(db, {
-      ...opts, globalDailyBudget: Amount.fromSigna("1000"),
+      ...opts, policy: policyWith("1000"),
     }).status;
     expect(status.spentTodayPlanck).toBe(500_000_000);
     expect(status.budgetRemainingPlanck).toBe(99_500_000_000);
@@ -150,10 +157,36 @@ describe("buildProjection", () => {
     expect(projection.status.totalDistributedPlanck).toBe(0);
   });
 
+  // The public page quotes these back to miners to explain why a forged block
+  // earned nothing, so they travel with every status row rather than being
+  // duplicated into the site's own configuration.
+  test("publishes the reward rules in force", () => {
+    const status = buildProjection(db, {
+      ...opts, policy: policyWith("1000"), minPayout: Amount.fromSigna("5"),
+    }).status;
+    expect(status.rewardPerBlockPlanck).toBe(100_000_000);
+    expect(status.accountDailyCapPlanck).toBe(1_000_000_000);
+    expect(status.globalDailyBudgetPlanck).toBe(100_000_000_000);
+    expect(status.minPayoutPlanck).toBe(500_000_000);
+  });
+
+  // Null means "not published", which the page answers with prose instead of
+  // figures. Zero would read as a programme that pays nothing.
+  test("reports unpublished rules as null rather than zero", () => {
+    const status = buildProjection(db, opts).status;
+    expect(status.rewardPerBlockPlanck).toBeNull();
+    expect(status.accountDailyCapPlanck).toBeNull();
+    expect(status.globalDailyBudgetPlanck).toBeNull();
+    expect(status.minPayoutPlanck).toBeNull();
+  });
+
   test("MUTATION SAFETY: the budget Amount passed in is not modified", () => {
     accrue("b1", "acct-1", "2.5");
     const budget = Amount.fromSigna("1000");
-    buildProjection(db, { ...opts, globalDailyBudget: budget });
+    buildProjection(db, {
+      ...opts,
+      policy: { ...policyWith("1000"), globalDailyBudget: budget },
+    });
     expect(budget.getSigna()).toBe("1000");
   });
 });
