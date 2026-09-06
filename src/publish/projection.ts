@@ -44,6 +44,23 @@ export interface MinerRow {
   lastSkipReason: BlockRewardStatus | null;
 }
 
+/**
+ * The testnet head as the health probe last described it.
+ *
+ * A narrow copy of the probe's `HeadBlock` rather than an import of it: the
+ * projection has no business knowing about generation signatures or observation
+ * timestamps, and the published page shows a chain that is moving, not a chain
+ * that is being diagnosed.
+ */
+export interface ChainHeadRow {
+  height: number;
+  generatorId: string;
+  /** The forger in the form a person recognises. */
+  generatorRS: string;
+  /** Epoch seconds. Ages on its own, so no observation time is needed with it. */
+  forgedAt: number;
+}
+
 export interface StatusRow {
   updatedAt: number;
   payoutsEnabled: boolean;
@@ -76,6 +93,15 @@ export interface StatusRow {
   globalDailyBudgetPlanck: number | null;
   /** Below this an accrual waits for a later batch rather than being sent. */
   minPayoutPlanck: number | null;
+  /**
+   * The testnet head, published so the page can show the chain moving rather
+   * than only the money it produces. Null until a probe has described a block.
+   */
+  testnetHeight: number | null;
+  lastForgerId: string | null;
+  lastForgerRS: string | null;
+  /** Epoch seconds the head block was forged. */
+  lastBlockForgedAt: number | null;
   totalDistributedPlanck: number;
   /** Total still owed to miners across every account. */
   pendingPlanck: number;
@@ -139,6 +165,8 @@ export interface ProjectionOptions {
   policy?: RewardPolicyConfig;
   /** The dust threshold a batch composes against. Published alongside `policy`. */
   minPayout?: Amount;
+  /** Absent until the health probe has described a head block at least once. */
+  chainHead?: ChainHeadRow;
 }
 
 /**
@@ -258,6 +286,10 @@ export function buildProjection(db: Ledger, opts: ProjectionOptions): Projection
       accountDailyCapPlanck: planckOrNull(opts.policy?.accountDailyCap),
       globalDailyBudgetPlanck: planckOrNull(globalDailyBudget),
       minPayoutPlanck: planckOrNull(opts.minPayout),
+      testnetHeight: opts.chainHead?.height ?? null,
+      lastForgerId: opts.chainHead?.generatorId ?? null,
+      lastForgerRS: opts.chainHead?.generatorRS ?? null,
+      lastBlockForgedAt: opts.chainHead?.forgedAt ?? null,
       totalDistributedPlanck,
       pendingPlanck,
       minerCount: miners.length,

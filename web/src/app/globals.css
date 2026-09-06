@@ -90,3 +90,96 @@ body {
   flex-direction: column;
   gap: inherit;
 }
+
+/*
+ * The rules card folds. <details> carries the state, so this is styling only —
+ * no client runtime, and the card still opens on a page that never hydrates.
+ *
+ * The default marker is replaced by a chevron drawn in the accent colour: the
+ * browser triangle is the one piece of this page that would render in the
+ * platform's own idiom rather than the site's.
+ */
+.rules > summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.25rem 0;
+}
+
+.rules > summary::-webkit-details-marker { display: none; }
+
+.rules > summary::after {
+  content: "";
+  margin-left: auto;
+  padding-left: 0.75rem;
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--blue2);
+  border-bottom: 2px solid var(--blue2);
+  transform: rotate(45deg);
+  transition: transform 150ms ease;
+  flex: none;
+  align-self: center;
+}
+
+.rules[open] > summary::after { transform: rotate(-135deg); }
+
+.rules > summary:hover::after { border-color: var(--blue3); }
+
+/*
+ * Links out to a block explorer. Underlined only on hover: every account in the
+ * miners table is one of these, and a table of permanently underlined monospace
+ * ids is unreadable.
+ */
+.ext-link {
+  color: inherit;
+  text-decoration: none;
+  transition: color 120ms ease;
+}
+
+.ext-link:hover,
+.ext-link:focus-visible {
+  color: var(--blue3);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/*
+ * Opening the rules is animated rather than instantaneous.
+ *
+ * `::details-content` is the only way to transition a <details> without
+ * JavaScript: the browser shows and hides the element's own children in a
+ * single frame, leaving nothing in between to animate. `interpolate-size`
+ * unlocks the transition to `auto`, so the panel grows to whatever the rules
+ * actually need — a max-height guess would clip them the moment the copy grows.
+ *
+ * The fade sits on a real element rather than on the pseudo, so a browser
+ * without `::details-content` still reads as opening instead of jumping; it
+ * simply does so at full height from the first frame.
+ */
+:root { interpolate-size: allow-keywords; }
+
+.rules::details-content {
+  block-size: 0;
+  overflow: hidden;
+  transition:
+    block-size 260ms ease,
+    content-visibility 260ms allow-discrete;
+}
+
+.rules[open]::details-content { block-size: auto; }
+
+.rules[open] .rules-body { animation: rules-unfold 260ms ease both; }
+
+@keyframes rules-unfold {
+  from { opacity: 0; transform: translateY(-6px); }
+}
+
+/* Motion here is decoration on a status page; the card still opens without it. */
+@media (prefers-reduced-motion: reduce) {
+  .rules::details-content { transition: none; }
+  .rules > summary::after { transition: none; }
+  .rules[open] .rules-body { animation: none; }
+}

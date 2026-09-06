@@ -17,6 +17,10 @@ const projection = (over: Partial<Projection> = {}): Projection => ({
     accountDailyCapPlanck: 1_000_000_000,
     globalDailyBudgetPlanck: 25_000_000_000,
     minPayoutPlanck: 500_000_000,
+    testnetHeight: 1_204_331,
+    lastForgerId: "acct-1",
+    lastForgerRS: "TS-ACCT-0001",
+    lastBlockForgedAt: NOW - 120,
     spentTodayPlanck: 150_000_000,
     totalDistributedPlanck: 250_000_000,
     pendingPlanck: 750_000_000,
@@ -116,6 +120,19 @@ describe("planPublish", () => {
     const state = settled();
     const next = projection();
     next.status.accountDailyCapPlanck = 2_000_000_000;
+
+    const { plan } = planPublish(next, state, { ...OPTS, nowSeconds: NOW + 5 });
+    expect(plan.writeStatus).toBe(true);
+  });
+
+  // The page shows the chain moving, so a new head must not wait for the
+  // heartbeat: between beats the height would sit still and read as a stall.
+  test("a new testnet block is a change", () => {
+    const state = settled();
+    const next = projection();
+    next.status.testnetHeight = 1_204_332;
+    next.status.lastForgerId = "acct-2";
+    next.status.lastBlockForgedAt = NOW - 10;
 
     const { plan } = planPublish(next, state, { ...OPTS, nowSeconds: NOW + 5 });
     expect(plan.writeStatus).toBe(true);

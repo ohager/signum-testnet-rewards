@@ -57,6 +57,7 @@ const statusFingerprint = (s: StatusRow): string =>
     s.payoutsEnabled, s.payoutsPaused, s.killSwitch,
     s.budgetRemainingPlanck, s.spentTodayPlanck, s.totalDistributedPlanck, s.pendingPlanck,
     s.rewardPerBlockPlanck, s.accountDailyCapPlanck, s.globalDailyBudgetPlanck, s.minPayoutPlanck,
+    s.testnetHeight, s.lastForgerId, s.lastBlockForgedAt,
     s.minerCount,
     s.nextPayoutAt, s.payoutBlockedBy, s.payoutDue, s.lastPayoutAt,
     s.openAlerts,

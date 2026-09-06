@@ -56,6 +56,16 @@ export interface Status {
   globalDailyBudgetPlanck: bigint | null;
   /** Below this an accrual rolls over to a later batch instead of being sent. */
   minPayoutPlanck: bigint | null;
+  /**
+   * The testnet head as the service last observed it, so the page can show the
+   * chain moving and not only the money it produces. Null before the service's
+   * first successful probe.
+   */
+  testnetHeight: number | null;
+  lastForgerId: string | null;
+  lastForgerRS: string | null;
+  /** Epoch seconds the head block was forged. */
+  lastBlockForgedAt: number | null;
   totalDistributedPlanck: bigint;
   /** Total still owed across every miner. */
   pendingPlanck: bigint;
@@ -111,6 +121,10 @@ export const READ_MODEL_COLUMNS = {
     "account_daily_cap_planck",
     "global_daily_budget_planck",
     "min_payout_planck",
+    "testnet_height",
+    "last_forger_id",
+    "last_forger_rs",
+    "last_block_forged_at",
     "total_distributed_planck",
     "pending_planck",
     "miner_count",
@@ -164,6 +178,10 @@ export function decodeStatus(row: Row): Status {
     accountDailyCapPlanck: nullablePlanck(row.account_daily_cap_planck),
     globalDailyBudgetPlanck: nullablePlanck(row.global_daily_budget_planck),
     minPayoutPlanck: nullablePlanck(row.min_payout_planck),
+    testnetHeight: nullableInt(row.testnet_height),
+    lastForgerId: str(row.last_forger_id),
+    lastForgerRS: str(row.last_forger_rs),
+    lastBlockForgedAt: nullableInt(row.last_block_forged_at),
     totalDistributedPlanck: planck(row.total_distributed_planck),
     pendingPlanck: planck(row.pending_planck),
     minerCount: int(row.miner_count),

@@ -134,11 +134,12 @@ export function createTursoPublisher(cfg: PublisherConfig): Publisher {
                                     payouts_paused, kill_switch, budget_remaining_planck,
                                     spent_today_planck, reward_per_block_planck,
                                     account_daily_cap_planck, global_daily_budget_planck,
-                                    min_payout_planck,
+                                    min_payout_planck, testnet_height, last_forger_id,
+                                    last_forger_rs, last_block_forged_at,
                                     total_distributed_planck, pending_planck, miner_count,
                                     next_payout_at,
                                     payout_blocked_by, payout_due, last_payout_at, open_alerts)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   updated_at               = excluded.updated_at,
                   service_status           = excluded.service_status,
@@ -151,6 +152,10 @@ export function createTursoPublisher(cfg: PublisherConfig): Publisher {
                   account_daily_cap_planck = excluded.account_daily_cap_planck,
                   global_daily_budget_planck = excluded.global_daily_budget_planck,
                   min_payout_planck        = excluded.min_payout_planck,
+                  testnet_height           = excluded.testnet_height,
+                  last_forger_id           = excluded.last_forger_id,
+                  last_forger_rs           = excluded.last_forger_rs,
+                  last_block_forged_at     = excluded.last_block_forged_at,
                   total_distributed_planck = excluded.total_distributed_planck,
                   pending_planck           = excluded.pending_planck,
                   miner_count              = excluded.miner_count,
@@ -171,6 +176,10 @@ export function createTursoPublisher(cfg: PublisherConfig): Publisher {
             projection.status.accountDailyCapPlanck,
             projection.status.globalDailyBudgetPlanck,
             projection.status.minPayoutPlanck,
+            projection.status.testnetHeight,
+            projection.status.lastForgerId,
+            projection.status.lastForgerRS,
+            projection.status.lastBlockForgedAt,
             projection.status.totalDistributedPlanck,
             projection.status.pendingPlanck,
             projection.status.minerCount,

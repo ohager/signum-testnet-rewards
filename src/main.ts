@@ -332,6 +332,9 @@ async function publishTick() {
         },
         policy: config.policy,
         minPayout: config.minPayout,
+        // The head the health probe already keeps, republished so the page can
+        // show the chain moving. Undefined before the first successful probe.
+        chainHead: healthMonitor.getChainHead()?.block,
       }),
     );
     // Only full syncs are logged: ordinary ticks are usually no-ops now, and a

@@ -12,6 +12,7 @@ import { Badge } from "@/components/Badge";
 import type { Tone } from "@/components/Badge";
 import { SignaAmount } from "@/components/SignaAmount";
 import { RewardRules } from "@/components/RewardRules";
+import { TESTNET_EXPLORER, mainnetAddressUrl } from "@/lib/explorer";
 
 /**
  * Matches the publisher's tick and the API route's cache window. Polling faster
@@ -132,10 +133,71 @@ function ServiceBanner({
           · {absoluteTime(status.updatedAt)}
         </span>
       </div>
+      <ChainHead status={status} now={now} />
       {status.openAlerts.length > 0 && (
         <CardSub>Open alerts: {status.openAlerts.join(", ").replace(/_/g, " ")}</CardSub>
       )}
     </Card>
+  );
+}
+
+/**
+ * The testnet head, under the health badges rather than beside the money.
+ *
+ * It belongs to the same question the badges answer — is the thing we are
+ * watching alive — and the headline cards are about SIGNA. The forger is shown
+ * because it is the one line on the page that proves blocks are being won by
+ * somebody right now, and because a miner recognises their own address in it.
+ *
+ * The height links to the TESTNET explorer, where the block is; the forger
+ * links to mainnet like every other account here, because that is where their
+ * reward is going to land.
+ */
+function ChainHead({ status, now }: { status: Status; now: number }) {
+  if (status.testnetHeight === null) return null;
+
+  return (
+    <CardSub>
+      Testnet block{" "}
+      <a
+        className="ext-link font-mono"
+        style={{ color: "var(--blue3)" }}
+        href={TESTNET_EXPLORER}
+        target="_blank"
+        rel="noreferrer"
+      >
+        #{new Intl.NumberFormat("en-US").format(status.testnetHeight)}
+      </a>
+      {status.lastForgerId !== null && (
+        <>
+          {" "}
+          forged by{" "}
+          <ExplorerLink accountId={status.lastForgerId} label={status.lastForgerRS} />
+        </>
+      )}
+      {status.lastBlockForgedAt !== null && ` · ${relativeTime(status.lastBlockForgedAt, now)}`}
+    </CardSub>
+  );
+}
+
+/**
+ * An account id, linked to where its money ends up.
+ *
+ * Always MAINNET: the ids on this page are testnet forgers, but the question a
+ * visitor has about one of them is "did this account get paid", and only the
+ * mainnet explorer answers that.
+ */
+function ExplorerLink({ accountId, label }: { accountId: string; label: string | null }) {
+  return (
+    <a
+      className="ext-link font-mono"
+      href={mainnetAddressUrl(accountId)}
+      target="_blank"
+      rel="noreferrer"
+      title={`${accountId} on the mainnet explorer`}
+    >
+      {label ?? shortId(accountId)}
+    </a>
   );
 }
 
@@ -328,7 +390,7 @@ function MinerTable({ miners, status, now }: { miners: Miner[]; status: Status; 
                 return (
                   <tr key={m.accountId} style={{ borderTop: "1px solid var(--border)" }}>
                     <td className="py-2 pr-4">
-                      <span className="font-mono">{m.accountRS ?? shortId(m.accountId)}</span>
+                      <ExplorerLink accountId={m.accountId} label={m.accountRS} />
                       <span className="ml-1 text-[10px] text-[var(--muted)]">({m.accountId})</span>
                     </td>
                     <td className="py-2 pr-4">
@@ -376,7 +438,8 @@ function MinerTable({ miners, status, now }: { miners: Miner[]; status: Status; 
           : ""}
         Blocks counts what a miner was rewarded for; skipped blocks were forged but earned
         nothing, almost always because that account had already reached its cap for the day.
-        See the rules above.
+        See the rules above. Every address opens on the mainnet explorer, where the payment
+        arrives.
       </CardSub>
     </Card>
   );

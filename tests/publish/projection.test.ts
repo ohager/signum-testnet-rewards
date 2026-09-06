@@ -180,6 +180,33 @@ describe("buildProjection", () => {
     expect(status.minPayoutPlanck).toBeNull();
   });
 
+  // The head is in memory in the health monitor, never in the ledger, so it can
+  // only reach the page by being handed to the projection.
+  test("publishes the testnet head it is given", () => {
+    const status = buildProjection(db, {
+      ...opts,
+      chainHead: {
+        height: 1_204_331,
+        generatorId: "acct-9",
+        generatorRS: "TS-ACCT-0009",
+        forgedAt: 1_799_999_880,
+      },
+    }).status;
+    expect(status.testnetHeight).toBe(1_204_331);
+    expect(status.lastForgerId).toBe("acct-9");
+    expect(status.lastForgerRS).toBe("TS-ACCT-0009");
+    expect(status.lastBlockForgedAt).toBe(1_799_999_880);
+  });
+
+  // Every probe can fail, and the service starts before the first one answers.
+  test("reports an unobserved head as null", () => {
+    const status = buildProjection(db, opts).status;
+    expect(status.testnetHeight).toBeNull();
+    expect(status.lastForgerId).toBeNull();
+    expect(status.lastForgerRS).toBeNull();
+    expect(status.lastBlockForgedAt).toBeNull();
+  });
+
   test("MUTATION SAFETY: the budget Amount passed in is not modified", () => {
     accrue("b1", "acct-1", "2.5");
     const budget = Amount.fromSigna("1000");

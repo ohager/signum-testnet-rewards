@@ -252,6 +252,7 @@ export function createAdminServer(deps: AdminServerDeps): AdminServer {
             payouts: deps.payoutSchedule,
             policy: deps.policy,
             minPayout: deps.minPayout,
+            chainHead: deps.getChainHead()?.block,
           }),
           health: deps.getHealth() ?? null,
           chain: serialiseChain(deps.db, deps.getChainHead()),
