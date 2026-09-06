@@ -163,12 +163,55 @@ function Headline({ status, now }: { status: Status; now: number }) {
 
       <Card>
         <CardLabel>Budget remaining</CardLabel>
-        <p className="text-2xl" style={{ color: "var(--blue3)" }}>
-          <SignaAmount planck={status.budgetRemainingPlanck} />
-        </p>
-        <CardSub>today&apos;s allowance</CardSub>
+        <BudgetRemaining
+          planck={status.budgetRemainingPlanck}
+          spentToday={status.spentTodayPlanck}
+        />
       </Card>
     </div>
+  );
+}
+
+/**
+ * A null budget means the deployment sets no daily ceiling, which is a different
+ * statement from an allowance spent down to nothing — the figure zero. Saying
+ * "0.00 SIGNA" for it would tell miners the day is over when nothing caps it.
+ *
+ * The spend is shown either way, and it is what makes this card legible next to
+ * "Pending": the two answer different questions. Pending is every unpaid
+ * accrual, however old; this is what TODAY consumed, paid or not. Without the
+ * spend on show, the gap between them reads as an arithmetic error.
+ */
+function BudgetRemaining({
+  planck,
+  spentToday,
+}: {
+  planck: bigint | null;
+  spentToday: bigint;
+}) {
+  const spent = (
+    <CardSub>
+      <SignaAmount planck={spentToday} /> spent today
+    </CardSub>
+  );
+
+  if (planck === null) {
+    return (
+      <>
+        <p className="text-2xl" style={{ color: "var(--blue3)" }}>
+          unlimited
+        </p>
+        {spent}
+      </>
+    );
+  }
+  return (
+    <>
+      <p className="text-2xl" style={{ color: "var(--blue3)" }}>
+        <SignaAmount planck={planck} />
+      </p>
+      {spent}
+    </>
   );
 }
 

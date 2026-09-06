@@ -72,6 +72,67 @@ describe("buildProjection", () => {
     expect(projection.status.budgetRemainingPlanck).toBe(99_750_000_000);
   });
 
+  // Reachable by lowering the budget mid-day below what has already accrued:
+  // the caps only guard accruals made under the budget in force at the time.
+  test("clamps the remaining budget at zero rather than reporting a debt", () => {
+    accrue("b1", "acct-1", "2.5");
+    accrue("b2", "acct-2", "2.5");
+    const projection = buildProjection(db, {
+      ...opts, globalDailyBudget: Amount.fromSigna("1"),
+    });
+    expect(projection.status.budgetRemainingPlanck).toBe(0);
+  });
+
+  // Null is "no ceiling", which the page renders as unlimited. Publishing zero
+  // would be indistinguishable from a budget spent down to nothing.
+  test("reports no budget at all as null, not as nothing left", () => {
+    accrue("b1", "acct-1", "2.5");
+    expect(buildProjection(db, opts).status.budgetRemainingPlanck).toBeNull();
+  });
+
+  test("reports what today has consumed alongside what is left", () => {
+    accrue("b1", "acct-1", "2.5");
+    accrue("b2", "acct-2", "2.5");
+    const status = buildProjection(db, {
+      ...opts, globalDailyBudget: Amount.fromSigna("1000"),
+    }).status;
+    expect(status.spentTodayPlanck).toBe(500_000_000);
+    expect(status.budgetRemainingPlanck).toBe(99_500_000_000);
+  });
+
+  // The budget is consumed at accrual, so paying an accrual out does not give
+  // the day's allowance back. Reading the two cards together must not suggest
+  // otherwise.
+  test("counts an accrual that has already been paid as spent", () => {
+    accrue("b1", "acct-1", "2.5");
+    claimBatch(db, { recipientIds: ["acct-1"], deadlineAt: 1 });
+    expect(buildProjection(db, opts).status.spentTodayPlanck).toBe(250_000_000);
+  });
+
+  test("counts only today: yesterday's accruals do not consume today's budget", () => {
+    recordBlockReward(db, {
+      blockId: "old", height: 1, blockTimestamp: 400_000, chainDay: "2026-03-13",
+      generatorId: "acct-1", generatorPublicKey: "pk-acct-1",
+      status: "accrued", amount: Amount.fromSigna("2.5"),
+    });
+    accrue("b1", "acct-1", "2.5");
+    expect(buildProjection(db, opts).status.spentTodayPlanck).toBe(250_000_000);
+  });
+
+  test("a skipped block consumes none of the budget", () => {
+    accrue("b1", "acct-1", "0", "skipped_global_cap");
+    expect(buildProjection(db, opts).status.spentTodayPlanck).toBe(0);
+  });
+
+  // With no ceiling there is nothing to subtract from, but the day's spend is
+  // still a real figure and the page still shows it.
+  test("reports the day's spend even when no budget is configured", () => {
+    accrue("b1", "acct-1", "2.5");
+    const status = buildProjection(db, opts).status;
+    expect(status.budgetRemainingPlanck).toBeNull();
+    expect(status.spentTodayPlanck).toBe(250_000_000);
+  });
+
   test("STALENESS: the status carries the timestamp the page checks", () => {
     expect(buildProjection(db, opts).status.updatedAt).toBe(opts.nowEpochSeconds);
   });

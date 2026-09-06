@@ -13,6 +13,7 @@ const projection = (over: Partial<Projection> = {}): Projection => ({
     payoutsPaused: false,
     killSwitch: false,
     budgetRemainingPlanck: 100_000_000,
+    spentTodayPlanck: 150_000_000,
     totalDistributedPlanck: 250_000_000,
     pendingPlanck: 750_000_000,
     minerCount: 1,
@@ -91,6 +92,18 @@ describe("planPublish", () => {
     const { plan } = planPublish(next, state, { ...OPTS, nowSeconds: NOW + 5 });
     expect(plan.writeStatus).toBe(true);
     expect(plan.miners).toEqual([]);
+  });
+
+  // Without a budget the remaining figure is null forever, so the day's spend is
+  // the ONLY status field that moves as blocks accrue. Leaving it out of the
+  // fingerprint would freeze the published card between heartbeats.
+  test("a changed daily spend is a change, even when nothing else moved", () => {
+    const state = settled();
+    const next = projection();
+    next.status.spentTodayPlanck = 900_000_000;
+
+    const { plan } = planPublish(next, state, { ...OPTS, nowSeconds: NOW + 5 });
+    expect(plan.writeStatus).toBe(true);
   });
 
   test("THE TIMESTAMP ALONE IS NOT A CHANGE", () => {

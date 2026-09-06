@@ -34,7 +34,18 @@ export interface Status {
   payoutsEnabled: boolean;
   payoutsPaused: boolean;
   killSwitch: boolean;
-  budgetRemainingPlanck: bigint;
+  /**
+   * What is left of today's allowance, clamped at zero by the service.
+   * Null when the deployment configures no daily ceiling at all, which the
+   * page shows as unlimited rather than as an exhausted budget.
+   */
+  budgetRemainingPlanck: bigint | null;
+  /**
+   * What today's accruals consumed, INCLUDING any already paid out: the
+   * budget is spent at accrual and a payout does not return it. Shown next
+   * to the remainder so the two cards read as one sentence.
+   */
+  spentTodayPlanck: bigint;
   totalDistributedPlanck: bigint;
   /** Total still owed across every miner. */
   pendingPlanck: bigint;
@@ -85,6 +96,7 @@ export const READ_MODEL_COLUMNS = {
     "payouts_paused",
     "kill_switch",
     "budget_remaining_planck",
+    "spent_today_planck",
     "total_distributed_planck",
     "pending_planck",
     "miner_count",
@@ -132,7 +144,8 @@ export function decodeStatus(row: Row): Status {
     payoutsEnabled: bool(row.payouts_enabled),
     payoutsPaused: bool(row.payouts_paused),
     killSwitch: bool(row.kill_switch),
-    budgetRemainingPlanck: planck(row.budget_remaining_planck),
+    budgetRemainingPlanck: nullablePlanck(row.budget_remaining_planck),
+    spentTodayPlanck: planck(row.spent_today_planck),
     totalDistributedPlanck: planck(row.total_distributed_planck),
     pendingPlanck: planck(row.pending_planck),
     minerCount: int(row.miner_count),
@@ -209,7 +222,11 @@ export function toWire(snapshot: Snapshot): SnapshotWire {
   return {
     status: {
       ...snapshot.status,
-      budgetRemainingPlanck: snapshot.status.budgetRemainingPlanck.toString(),
+      budgetRemainingPlanck:
+        snapshot.status.budgetRemainingPlanck === null
+          ? null
+          : snapshot.status.budgetRemainingPlanck.toString(),
+      spentTodayPlanck: snapshot.status.spentTodayPlanck.toString(),
       totalDistributedPlanck: snapshot.status.totalDistributedPlanck.toString(),
       pendingPlanck: snapshot.status.pendingPlanck.toString(),
     },
@@ -229,7 +246,11 @@ export function fromWire(wire: SnapshotWire): Snapshot {
   return {
     status: {
       ...wire.status,
-      budgetRemainingPlanck: BigInt(wire.status.budgetRemainingPlanck),
+      budgetRemainingPlanck:
+        wire.status.budgetRemainingPlanck === null
+          ? null
+          : BigInt(wire.status.budgetRemainingPlanck),
+      spentTodayPlanck: BigInt(wire.status.spentTodayPlanck),
       totalDistributedPlanck: BigInt(wire.status.totalDistributedPlanck),
       pendingPlanck: BigInt(wire.status.pendingPlanck),
     },

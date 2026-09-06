@@ -9,7 +9,9 @@
  * no remote state worth migrating.
  *
  * Amounts are INTEGER planck, matching the local ledger, so no rounding is
- * introduced by publishing.
+ * introduced by publishing. `budget_remaining_planck` is nullable because NULL
+ * carries meaning there — no daily ceiling is configured — which zero cannot,
+ * zero being a budget spent down to nothing.
  *
  * Keep every column in step with the INSERTs in `tursoPublisher.ts`: a column
  * missing here surfaces as a runtime SQL error on the first push. Adding one is
@@ -25,7 +27,8 @@ CREATE TABLE IF NOT EXISTS status (
   payouts_enabled          INTEGER NOT NULL DEFAULT 0,
   payouts_paused           INTEGER NOT NULL DEFAULT 0,
   kill_switch              INTEGER NOT NULL DEFAULT 0,
-  budget_remaining_planck  INTEGER NOT NULL DEFAULT 0,
+  budget_remaining_planck  INTEGER,
+  spent_today_planck       INTEGER NOT NULL DEFAULT 0,
   total_distributed_planck INTEGER NOT NULL DEFAULT 0,
   pending_planck           INTEGER NOT NULL DEFAULT 0,
   miner_count              INTEGER NOT NULL DEFAULT 0,

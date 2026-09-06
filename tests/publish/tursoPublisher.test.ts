@@ -76,6 +76,7 @@ const projection = (over: Partial<Projection> = {}): Projection => ({
     payoutsPaused: false,
     killSwitch: false,
     budgetRemainingPlanck: 100_000_000,
+    spentTodayPlanck: 150_000_000,
     totalDistributedPlanck: 250_000_000,
     pendingPlanck: 750_000_000,
     minerCount: 1,
@@ -221,6 +222,23 @@ describe("publish", () => {
     const payout = (await rows("SELECT * FROM payouts"))[0]!;
     expect(payout.batch_id).toBe(7);
     expect(payout.tx_id).toBe("tx-7");
+  });
+
+  // Zero would be published as an exhausted allowance; the column has to be able
+  // to hold "no ceiling" as a value distinct from that.
+  test("publishes what the day has spent next to what is left", async () => {
+    await publisher.publish(projection());
+
+    expect((await statusRow()).spent_today_planck).toBe(150_000_000);
+  });
+
+  test("publishes an unconfigured budget as NULL, not as zero", async () => {
+    const next = projection();
+    next.status.budgetRemainingPlanck = null;
+
+    await publisher.publish(next);
+
+    expect((await statusRow()).budget_remaining_planck).toBeNull();
   });
 
   test("republishing upserts rather than duplicating", async () => {

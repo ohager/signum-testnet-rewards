@@ -55,7 +55,8 @@ export function emptyPublishState(): PublishState {
 const statusFingerprint = (s: StatusRow): string =>
   JSON.stringify([
     s.payoutsEnabled, s.payoutsPaused, s.killSwitch,
-    s.budgetRemainingPlanck, s.totalDistributedPlanck, s.pendingPlanck, s.minerCount,
+    s.budgetRemainingPlanck, s.spentTodayPlanck, s.totalDistributedPlanck, s.pendingPlanck,
+    s.minerCount,
     s.nextPayoutAt, s.payoutBlockedBy, s.payoutDue, s.lastPayoutAt,
     s.openAlerts,
   ]);

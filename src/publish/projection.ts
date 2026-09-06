@@ -45,7 +45,17 @@ export interface StatusRow {
   payoutsEnabled: boolean;
   payoutsPaused: boolean;
   killSwitch: boolean;
-  budgetRemainingPlanck: number;
+  /** Left of today's allowance, never negative. Null when no budget is configured. */
+  budgetRemainingPlanck: number | null;
+  /**
+   * What today's accruals have consumed of the allowance, budget or not.
+   *
+   * Counted at accrual, so it INCLUDES amounts already paid out — paying an
+   * accrual does not hand the day's budget back. That makes it the honest
+   * partner to `budgetRemainingPlanck`, and the only figure that still moves
+   * when no ceiling is configured.
+   */
+  spentTodayPlanck: number;
   totalDistributedPlanck: number;
   /** Total still owed to miners across every account. */
   pendingPlanck: number;
@@ -101,6 +111,7 @@ export interface ProjectionOptions {
    * real cutoff, because every row there is read again on every page view.
    */
   minerActivitySince?: number;
+  /** Absent means the deployment sets no daily ceiling, published as unlimited. */
   globalDailyBudget?: Amount;
 }
 
@@ -187,10 +198,16 @@ export function buildProjection(db: Ledger, opts: ProjectionOptions): Projection
     nowEpochSeconds: opts.nowEpochSeconds,
   });
 
+  // Clamped at zero because the remainder can go negative when an operator
+  // lowers the budget below what the day has already accrued: the caps only
+  // ever guarded accruals against the budget in force at the time. A negative
+  // allowance is not something anyone can act on, and it would render as a
+  // headline figure implying the programme owes the budget money.
   const spentToday = sumAccruedGlobalOnDay(db, opts.chainDay);
-  const budgetRemainingPlanck = opts.globalDailyBudget
-    ? toPlanckInt(opts.globalDailyBudget.clone().subtract(spentToday))
-    : 0;
+  const budgetRemainingPlanck =
+    opts.globalDailyBudget === undefined
+      ? null
+      : Math.max(0, toPlanckInt(opts.globalDailyBudget.clone().subtract(spentToday)));
 
   const payouts: PayoutRow[] = listRecentBatches(db, opts.recentPayoutLimit)
     .filter((b) => b.status === "confirmed")
@@ -209,6 +226,7 @@ export function buildProjection(db: Ledger, opts: ProjectionOptions): Projection
       payoutsPaused: isPayoutsPaused(db),
       killSwitch: isKillSwitchTripped(db),
       budgetRemainingPlanck,
+      spentTodayPlanck: toPlanckInt(spentToday),
       totalDistributedPlanck,
       pendingPlanck,
       minerCount: miners.length,
