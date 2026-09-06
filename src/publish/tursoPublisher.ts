@@ -172,11 +172,13 @@ export function createTursoPublisher(cfg: PublisherConfig): Publisher {
 
       statements.push(
         ...plan.miners.map((m) => ({
-          sql: `INSERT INTO miners (account_id, account_rs, blocks_mined, blocks_skipped,
-                                    pending_planck, paid_planck, last_block_at, last_skip_reason)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          sql: `INSERT INTO miners (account_id, account_rs, mainnet_account, blocks_mined,
+                                    blocks_skipped, pending_planck, paid_planck,
+                                    last_block_at, last_skip_reason)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account_id) DO UPDATE SET
                   account_rs       = excluded.account_rs,
+                  mainnet_account  = excluded.mainnet_account,
                   blocks_mined     = excluded.blocks_mined,
                   blocks_skipped   = excluded.blocks_skipped,
                   pending_planck   = excluded.pending_planck,
@@ -184,7 +186,7 @@ export function createTursoPublisher(cfg: PublisherConfig): Publisher {
                   last_block_at    = excluded.last_block_at,
                   last_skip_reason = excluded.last_skip_reason`,
           args: [
-            m.accountId, m.accountRS, m.blocksMined, m.blocksSkipped,
+            m.accountId, m.accountRS, m.mainnetAccount, m.blocksMined, m.blocksSkipped,
             m.pendingPlanck, m.paidPlanck, m.lastBlockAt, m.lastSkipReason,
           ],
         })),

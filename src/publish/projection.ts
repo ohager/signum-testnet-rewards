@@ -15,10 +15,22 @@ import type { PayoutBlocker } from "../payout/schedule.ts";
 const toEpochSeconds = (chainTimestamp: number): number =>
   Math.floor(ChainTime.fromChainTimestamp(chainTimestamp).getDate().getTime() / 1000);
 
+/**
+ * Whether the same account exists on mainnet with a public key set.
+ *
+ * `unknown` is a real third case, not a placeholder: the lookup cache is pruned
+ * by retention, so a miner who stopped forging long ago loses their entry.
+ * Reporting that as "no mainnet account" would accuse someone of being
+ * unpayable on the strength of a cache miss.
+ */
+export type MainnetAccountState = "active" | "inactive" | "unknown";
+
 export interface MinerRow {
   accountId: string;
   /** The same account in the form a person can check against an explorer. */
   accountRS: string;
+  /** Payable only when "active": this is the eligibility gate, shown per miner. */
+  mainnetAccount: MainnetAccountState;
   blocksMined: number;
   blocksSkipped: number;
   pendingPlanck: number;
@@ -114,12 +126,16 @@ export function buildProjection(db: Ledger, opts: ProjectionOptions): Projection
                                 THEN amount_planck ELSE 0 END), 0) AS pendingPlanck,
               COALESCE(SUM(CASE WHEN status = 'accrued' AND batch_id IS NOT NULL
                                 THEN amount_planck ELSE 0 END), 0) AS paidPlanck,
-              MAX(block_timestamp)                                 AS lastBlockAt
-         FROM block_rewards
+              MAX(block_timestamp)                                 AS lastBlockAt,
+              MAX(ma.is_active)                                    AS mainnetIsActive
+         FROM block_rewards br
+         LEFT JOIN mainnet_accounts ma ON ma.account_id = br.generator_id
         GROUP BY generator_id
         ORDER BY pendingPlanck DESC, paidPlanck DESC, generator_id`,
     )
-    .all() as Omit<MinerRow, "lastSkipReason" | "accountRS">[];
+    .all() as (Omit<MinerRow, "lastSkipReason" | "accountRS" | "mainnetAccount"> & {
+      mainnetIsActive: number | null;
+    })[];
 
   const skipStmt = db.query(
     `SELECT status FROM block_rewards
@@ -129,9 +145,12 @@ export function buildProjection(db: Ledger, opts: ProjectionOptions): Projection
 
   const allMiners: MinerRow[] = minerRows.map((m) => {
     const skip = skipStmt.get(m.accountId) as { status: BlockRewardStatus } | null;
+    const { mainnetIsActive, ...row } = m;
     return {
-      ...m,
+      ...row,
       accountRS: toReedSolomon(m.accountId),
+      mainnetAccount:
+        mainnetIsActive === null ? "unknown" : mainnetIsActive === 1 ? "active" : "inactive",
       // getEpoch() returns MILLISECONDS despite its name; getDate() is the
       // unambiguous route to the seconds every other timestamp here uses.
       lastBlockAt: m.lastBlockAt === null ? null : toEpochSeconds(m.lastBlockAt),

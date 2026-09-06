@@ -13,6 +13,7 @@ const api = (path: string, init?: RequestInit) =>
 interface MinerRow {
     accountId: string;
     accountRS: string;
+    mainnetAccount: "active" | "inactive" | "unknown";
     blocksMined: number;
     blocksSkipped: number;
     pendingPlanck: number;
@@ -88,6 +89,17 @@ interface State {
         railsVerdict: { ok: boolean; violation?: string; detail?: string };
     };
 }
+
+/**
+ * The eligibility gate, per miner. "unknown" is muted rather than red: the
+ * lookup cache is pruned by retention, so an absent entry means we have not
+ * checked recently, not that the account is missing.
+ */
+const MAINNET_STATE: Record<string, { tone: Tone; label: string }> = {
+    active: {tone: "ok", label: "payable"},
+    inactive: {tone: "warn", label: "no mainnet acct"},
+    unknown: {tone: "muted", label: "unchecked"},
+};
 
 const BLOCKED_LABEL: Record<string, string> = {
     disabled: "payouts disabled (shadow mode)",
@@ -426,6 +438,10 @@ function App() {
                     <CardSub>
                         across {miners.filter((m) => m.pendingPlanck > 0).length} of {miners.length} miners
                     </CardSub>
+                    <CardSub>
+                        {miners.filter((m) => m.mainnetAccount === "inactive").length} without a
+                        mainnet account — they forge but cannot be paid
+                    </CardSub>
                 </Card>
 
                 <Card>
@@ -467,6 +483,7 @@ function App() {
                             <thead>
                             <tr className="text-left text-[9px] uppercase tracking-[2px] text-[var(--blue2)]">
                                 <th className="py-1 pr-3 font-semibold">Account</th>
+                                <th className="py-1 pr-3 font-semibold">Mainnet</th>
                                 <th className="py-1 pr-3 text-right font-semibold">Pending</th>
                                 <th className="py-1 pr-3 text-right font-semibold">Paid</th>
                                 <th className="py-1 pr-3 text-right font-semibold">Blocks</th>
@@ -479,6 +496,11 @@ function App() {
                                 <tr key={m.accountId} style={{borderTop: "1px solid var(--border)"}}>
                                     <td className="py-1 pr-3">
                                         <AccountId rs={m.accountRS} id={m.accountId}/>
+                                    </td>
+                                    <td className="py-1 pr-3">
+                                        <Badge tone={MAINNET_STATE[m.mainnetAccount]?.tone ?? "muted"}>
+                                            {MAINNET_STATE[m.mainnetAccount]?.label ?? m.mainnetAccount}
+                                        </Badge>
                                     </td>
                                     <td className="py-1 pr-3 text-right">
                                         <SignaAmount planck={String(m.pendingPlanck)}/>

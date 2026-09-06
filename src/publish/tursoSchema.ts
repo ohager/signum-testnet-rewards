@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS status (
 CREATE TABLE IF NOT EXISTS miners (
   account_id       TEXT    PRIMARY KEY,
   account_rs       TEXT,
+  mainnet_account  TEXT,
   blocks_mined     INTEGER NOT NULL DEFAULT 0,
   blocks_skipped   INTEGER NOT NULL DEFAULT 0,
   pending_planck   INTEGER NOT NULL DEFAULT 0,

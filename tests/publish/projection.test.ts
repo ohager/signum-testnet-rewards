@@ -5,6 +5,7 @@ import type { Ledger } from "../../src/ledger/db.ts";
 import { recordBlockReward } from "../../src/ledger/blockRewards.ts";
 import { claimBatch } from "../../src/ledger/batches.ts";
 import { tripKillSwitch, setPayoutsPaused } from "../../src/ledger/state.ts";
+import { upsertAccount } from "../../src/ledger/mainnetAccounts.ts";
 import { buildProjection } from "../../src/publish/projection.ts";
 import type { BlockRewardStatus } from "../../src/domain/types.ts";
 
@@ -212,5 +213,54 @@ describe("the published miner window", () => {
     accrueAt("b2", "acct-2", RECENT);
 
     expect(buildProjection(db, opts).status.minerCount).toBe(2);
+  });
+});
+
+describe("mainnet account state per miner", () => {
+  // The eligibility gate already runs on every block; this only surfaces it, so
+  // a miner can see WHY they are forging without being paid.
+  test("a miner with an active mainnet account is payable", () => {
+    accrue("b1", "acct-1", "2.5");
+    upsertAccount(db, { accountId: "acct-1", publicKey: "pk", isActive: true }, 1_800_000_000);
+
+    expect(buildProjection(db, opts).miners[0]!.mainnetAccount).toBe("active");
+  });
+
+  test("a miner without one is flagged inactive rather than merely unpaid", () => {
+    accrue("b1", "acct-1", "2.5", "skipped_no_mainnet_account");
+    upsertAccount(db, { accountId: "acct-1", publicKey: null, isActive: false }, 1_800_000_000);
+
+    expect(buildProjection(db, opts).miners[0]!.mainnetAccount).toBe("inactive");
+  });
+
+  test("A CACHE MISS IS UNKNOWN, NOT AN ACCUSATION", () => {
+    // Retention prunes the lookup cache, so a long-idle miner loses their entry.
+    // Reporting that as "no mainnet account" would claim they are unpayable on
+    // the strength of a missing row.
+    accrue("b1", "never-checked", "2.5");
+
+    expect(buildProjection(db, opts).miners[0]!.mainnetAccount).toBe("unknown");
+  });
+
+  test("the state does not disturb the pending ranking", () => {
+    accrue("b1", "small", "2.5");
+    accrue("b2", "big", "2.5");
+    accrue("b3", "big", "2.5");
+    upsertAccount(db, { accountId: "small", publicKey: "pk", isActive: true }, 1_800_000_000);
+
+    const miners = buildProjection(db, opts).miners;
+    expect(miners.map((m) => m.accountId)).toEqual(["big", "small"]);
+    expect(miners.map((m) => m.mainnetAccount)).toEqual(["unknown", "active"]);
+  });
+
+  test("one cached lookup covers every block that miner forged", () => {
+    accrue("b1", "acct-1", "2.5");
+    accrue("b2", "acct-1", "2.5");
+    upsertAccount(db, { accountId: "acct-1", publicKey: "pk", isActive: true }, 1_800_000_000);
+
+    const miners = buildProjection(db, opts).miners;
+    expect(miners).toHaveLength(1);
+    expect(miners[0]!.blocksMined).toBe(2);
+    expect(miners[0]!.mainnetAccount).toBe("active");
   });
 });

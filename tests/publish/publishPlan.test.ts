@@ -24,12 +24,12 @@ const projection = (over: Partial<Projection> = {}): Projection => ({
   },
   miners: [
     {
-      accountId: "acct-1", accountRS: "TS-ACCT-0001", blocksMined: 3, blocksSkipped: 0,
+      accountId: "acct-1", accountRS: "TS-ACCT-0001", mainnetAccount: "active", blocksMined: 3, blocksSkipped: 0,
       pendingPlanck: 750_000_000, paidPlanck: 0,
       lastBlockAt: 500_000, lastSkipReason: null,
     },
     {
-      accountId: "acct-2", accountRS: "TS-ACCT-0002", blocksMined: 1, blocksSkipped: 0,
+      accountId: "acct-2", accountRS: "TS-ACCT-0002", mainnetAccount: "inactive", blocksMined: 1, blocksSkipped: 0,
       pendingPlanck: 250_000_000, paidPlanck: 0,
       lastBlockAt: 500_001, lastSkipReason: null,
     },

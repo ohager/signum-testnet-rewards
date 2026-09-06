@@ -87,7 +87,7 @@ const projection = (over: Partial<Projection> = {}): Projection => ({
   },
   miners: [
     {
-      accountId: "acct-1", accountRS: "TS-ACCT-0001", blocksMined: 3, blocksSkipped: 1,
+      accountId: "acct-1", accountRS: "TS-ACCT-0001", mainnetAccount: "active", blocksMined: 3, blocksSkipped: 1,
       pendingPlanck: 750_000_000, paidPlanck: 250_000_000,
       lastBlockAt: 500_000, lastSkipReason: "skipped_no_mainnet_account",
     },
@@ -214,6 +214,7 @@ describe("publish", () => {
     const miner = (await rows("SELECT * FROM miners"))[0]!;
     expect(miner.account_id).toBe("acct-1");
     expect(miner.account_rs).toBe("TS-ACCT-0001");
+    expect(miner.mainnet_account).toBe("active");
     expect(miner.pending_planck).toBe(750_000_000);
     expect(miner.last_skip_reason).toBe("skipped_no_mainnet_account");
 
@@ -302,10 +303,24 @@ describe("turso I/O", () => {
     expect(outcome.payoutsWritten).toBe(0);
   });
 
+  test("a miner activating their mainnet account is republished", async () => {
+    const first = projection();
+    first.miners[0]!.mainnetAccount = "inactive";
+    await publisher.publish(first);
+
+    clockMs += 30_000;
+    const next = projection();
+    next.miners[0]!.mainnetAccount = "active";
+    const outcome = await publisher.publish(next);
+
+    expect(outcome.minersWritten).toBe(1);
+    expect((await rows("SELECT mainnet_account FROM miners"))[0]!.mainnet_account).toBe("active");
+  });
+
   test("only the changed miner is sent", async () => {
     const first = projection();
     first.miners.push({
-      accountId: "acct-2", accountRS: "TS-ACCT-0002", blocksMined: 1, blocksSkipped: 0,
+      accountId: "acct-2", accountRS: "TS-ACCT-0002", mainnetAccount: "inactive", blocksMined: 1, blocksSkipped: 0,
       pendingPlanck: 250_000_000, paidPlanck: 0,
       lastBlockAt: 500_001, lastSkipReason: null,
     });

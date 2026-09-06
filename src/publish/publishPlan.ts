@@ -63,7 +63,7 @@ const statusFingerprint = (s: StatusRow): string =>
 const minerFingerprint = (m: MinerRow): string =>
   JSON.stringify([
     m.blocksMined, m.blocksSkipped, m.pendingPlanck, m.paidPlanck,
-    m.lastBlockAt, m.lastSkipReason,
+    m.lastBlockAt, m.lastSkipReason, m.mainnetAccount,
   ]);
 
 const payoutFingerprint = (p: PayoutRow): string =>

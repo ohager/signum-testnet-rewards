@@ -120,6 +120,8 @@ describe("admin server routes", () => {
       accountId: "4325295135044374377",
       // The whole point: the panel shows an address a person can check.
       accountRS: "TS-R5VB-2B6J-2N8C-5BN3S",
+      // No lookup has been cached for this account in the test ledger.
+      mainnetAccount: "unknown",
       blocksMined: 1, blocksSkipped: 0,
       pendingPlanck: 250_000_000, paidPlanck: 0,
       // Chain timestamp 500000 as epoch seconds, not chain time.
