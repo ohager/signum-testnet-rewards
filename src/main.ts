@@ -19,6 +19,8 @@ import type { Channel } from "./notify/channel.ts";
 import { buildProjection } from "./publish/projection.ts";
 import { createTursoPublisher } from "./publish/tursoPublisher.ts";
 import { createAdminServer } from "./admin/server.ts";
+import { simulatePayout } from "./payout/simulate.ts";
+import { generateSignKeys } from "@signumjs/crypto";
 import { toChainDay } from "./domain/chainDay.ts";
 import { ChainTime } from "@signumjs/util";
 import { pruneLedger } from "./ledger/retention.ts";
@@ -75,6 +77,18 @@ if (config.notify.email) channels.push(createEmailChannel(config.notify.email));
 boot.info("notification channels", { channels: channels.map((c) => c.name).join(", ") || "none" });
 
 const notifier = createNotifier({ db, channels, log: log.child("notify") });
+
+// The public key is derived from the seed so the simulator can ask the node to
+// build a real transaction. The seed itself never leaves this scope, and the
+// private key is never derived at all: an unsigned transaction needs neither.
+const payoutPublicKey = config.payouts.accountSeed
+  ? generateSignKeys(config.payouts.accountSeed).publicKey
+  : undefined;
+boot.info(
+  payoutPublicKey
+    ? "payout account configured; payout simulation available"
+    : "no payout account seed; payout simulation will report it as unconfigured",
+);
 const wsMonitor = createWsMonitor(config.chain.testnetWsUrl);
 
 // Fork detection is optional, like publishing: without reference nodes there is
@@ -162,6 +176,15 @@ const adminServer = createAdminServer({
   },
   getHealth: () => healthMonitor.getLatest(),
   getChainHead: () => healthMonitor.getChainHead(),
+  channels,
+  simulate: (report) =>
+    simulatePayout(report, {
+      senderPublicKey: payoutPublicKey,
+      fee: config.maxFee,
+      deadlineMinutes: config.payouts.deadlineMinutes,
+      sendToMany: (args) => testnet.buildUnsignedMultiOut(args),
+      sendToOne: (args) => testnet.buildUnsignedSend(args),
+    }),
   getForkState: () => forkMonitor?.getState(),
 });
 boot.info("admin UI listening", { url: adminServer.url });

@@ -4,6 +4,9 @@ import { openLedger } from "../../src/ledger/db.ts";
 import type { Ledger } from "../../src/ledger/db.ts";
 import { createAdminServer } from "../../src/admin/server.ts";
 import type { ChainHead } from "../../src/health/monitor.ts";
+import type { Channel } from "../../src/notify/channel.ts";
+import type { PayoutSimulation } from "../../src/payout/simulate.ts";
+import { isChannelEnabled } from "../../src/ledger/channelState.ts";
 import type { AdminServer } from "../../src/admin/server.ts";
 import { isPayoutsPaused, isKillSwitchTripped, tripKillSwitch } from "../../src/ledger/state.ts";
 import { recordBlockReward } from "../../src/ledger/blockRewards.ts";
@@ -13,10 +16,34 @@ let db: Ledger;
 let server: AdminServer;
 let base: string;
 let chainHead: ChainHead | undefined;
+let testChannels: Channel[];
+let sent: string[];
+let sendFails: boolean;
+let simulationResult: PayoutSimulation;
 const TOKEN = "test-token";
 
 beforeEach(() => {
   db = openLedger(":memory:");
+  sent = [];
+  sendFails = false;
+  testChannels = [
+    {
+      name: "email", minSeverity: "critical",
+      send: async () => {
+        if (sendFails) throw new Error("Resend responded 403");
+        sent.push("email");
+      },
+    },
+    { name: "discord", minSeverity: "warning", send: async () => { sent.push("discord"); } },
+  ];
+  simulationResult = {
+    built: true, recipientCount: 2, totalPlanck: "500000000", feePlanck: "1000000",
+    requiresOrdinarySend: false, railsVerdict: { ok: true },
+    transaction: {
+      signatureHash: "hash", unsignedTransactionBytes: "deadbeef",
+      transactionJSON: { type: 0, subtype: 1 },
+    },
+  };
   chainHead = {
     block: {
       height: 980_544,
@@ -43,6 +70,8 @@ beforeEach(() => {
     payoutSchedule: { enabled: false, intervalSeconds: 6 * 3_600, serviceStartedAt: 1_800_000_000 },
     getHealth: () => undefined,
     getChainHead: () => chainHead,
+    channels: testChannels,
+    simulate: async () => simulationResult,
   });
   base = server.url;
 });
@@ -183,5 +212,108 @@ describe("admin server routes", () => {
   test("the admin token never appears in a response body", async () => {
     const text = await (await fetch(`${base}/api/state`, auth)).text();
     expect(text).not.toContain(TOKEN);
+  });
+
+  test("GET /api/state lists the channels without leaking their credentials", async () => {
+    const body = (await (await fetch(`${base}/api/state`, auth)).json()) as {
+      channels: { name: string; minSeverity: string; enabled: boolean }[];
+      simulationAvailable: boolean;
+    };
+
+    expect(body.channels).toEqual([
+      { name: "email", minSeverity: "critical", enabled: true },
+      { name: "discord", minSeverity: "warning", enabled: true },
+    ]);
+    expect(body.simulationAvailable).toBe(true);
+    expect(JSON.stringify(body)).not.toContain("resend");
+  });
+
+  test("POST /api/notify/test sends through the named channel", async () => {
+    const res = await fetch(`${base}/api/notify/test`, {
+      ...auth, method: "POST",
+      body: JSON.stringify({ channel: "discord" }),
+    });
+
+    expect(await res.json()).toEqual({ ok: true, channel: "discord" });
+    expect(sent).toEqual(["discord"]);
+  });
+
+  test("A FAILING TEST REPORTS THE REASON rather than a 500", async () => {
+    sendFails = true;
+    const res = await fetch(`${base}/api/notify/test`, {
+      ...auth, method: "POST",
+      body: JSON.stringify({ channel: "email" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: false, channel: "email", error: "Resend responded 403",
+    });
+  });
+
+  test("A TEST IGNORES THE MUTE SWITCH: that is when you most need it", async () => {
+    await fetch(`${base}/api/notify/channel`, {
+      ...auth, method: "POST",
+      body: JSON.stringify({ channel: "discord", enabled: false }),
+    });
+
+    await fetch(`${base}/api/notify/test`, {
+      ...auth, method: "POST",
+      body: JSON.stringify({ channel: "discord" }),
+    });
+
+    expect(isChannelEnabled(db, "discord")).toBe(false);
+    expect(sent).toEqual(["discord"]);
+  });
+
+  test("POST /api/notify/channel mutes and unmutes, and it persists", async () => {
+    await fetch(`${base}/api/notify/channel`, {
+      ...auth, method: "POST",
+      body: JSON.stringify({ channel: "email", enabled: false }),
+    });
+    expect(isChannelEnabled(db, "email")).toBe(false);
+
+    await fetch(`${base}/api/notify/channel`, {
+      ...auth, method: "POST",
+      body: JSON.stringify({ channel: "email", enabled: true }),
+    });
+    expect(isChannelEnabled(db, "email")).toBe(true);
+  });
+
+  test("an unknown channel is a 404, and a bad body a 400", async () => {
+    const unknown = await fetch(`${base}/api/notify/test`, {
+      ...auth, method: "POST", body: JSON.stringify({ channel: "carrier-pigeon" }),
+    });
+    expect(unknown.status).toBe(404);
+
+    const malformed = await fetch(`${base}/api/notify/channel`, {
+      ...auth, method: "POST", body: "not json",
+    });
+    expect(malformed.status).toBe(400);
+
+    const notBoolean = await fetch(`${base}/api/notify/channel`, {
+      ...auth, method: "POST", body: JSON.stringify({ channel: "email", enabled: "yes" }),
+    });
+    expect(notBoolean.status).toBe(400);
+  });
+
+  test("POST /api/payout/simulate returns the unsigned transaction", async () => {
+    const res = await fetch(`${base}/api/payout/simulate`, { ...auth, method: "POST" });
+    const body = (await res.json()) as PayoutSimulation;
+
+    expect(body.built).toBe(true);
+    expect(body.transaction?.unsignedTransactionBytes).toBe("deadbeef");
+  });
+
+  test("GET on the simulate route is refused: it costs a node call", async () => {
+    expect((await fetch(`${base}/api/payout/simulate`, auth)).status).toBe(405);
+  });
+
+  test("the notification routes need the admin token like everything else", async () => {
+    const res = await fetch(`${base}/api/notify/test`, {
+      method: "POST", body: JSON.stringify({ channel: "discord" }),
+    });
+    expect(res.status).toBe(401);
+    expect(sent).toEqual([]);
   });
 });

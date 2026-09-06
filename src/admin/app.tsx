@@ -40,8 +40,27 @@ interface HeadBlock {
     observedAt: number;
 }
 
+interface ChannelRow {
+    name: string;
+    minSeverity: string;
+    enabled: boolean;
+}
+
+interface Simulation {
+    built: boolean;
+    reason?: string;
+    error?: string;
+    recipientCount: number;
+    totalPlanck: string;
+    feePlanck: string;
+    requiresOrdinarySend: boolean;
+    transaction?: { signatureHash: string; unsignedTransactionBytes: string; transactionJSON: object };
+}
+
 interface State {
     projection: { status: StatusRow; miners: MinerRow[] };
+    channels: ChannelRow[];
+    simulationAvailable: boolean;
     chain: {
         head: HeadBlock | null;
         indexed: { height: number; blockId: string; generatorRS: string } | null;
@@ -119,6 +138,8 @@ const btn: React.CSSProperties = {
 function App() {
     const [state, setState] = useState<State | undefined>();
     const [busy, setBusy] = useState(false);
+    const [testResult, setTestResult] = useState<string | undefined>();
+    const [simulation, setSimulation] = useState<Simulation | undefined>();
 
     const refresh = async () => setState((await (await api("state")).json()) as State);
     useEffect(() => {
@@ -131,6 +152,31 @@ function App() {
         setBusy(true);
         await api(path, {method: "POST"});
         await refresh();
+        setBusy(false);
+    };
+
+    const post = async (path: string, payload: unknown) => {
+        setBusy(true);
+        const res = await api(path, {
+            method: "POST",
+            headers: {"content-type": "application/json"},
+            body: JSON.stringify(payload),
+        });
+        const json = (await res.json()) as { ok?: boolean; error?: string; channel?: string };
+        setTestResult(
+            json.ok === false || json.error
+                ? `${json.channel ?? "request"} failed: ${json.error ?? "unknown error"}`
+                : `${json.channel ?? "done"}: sent`,
+        );
+        await refresh();
+        setBusy(false);
+    };
+
+    const simulate = async () => {
+        setBusy(true);
+        setSimulation(undefined);
+        const res = await api("payout/simulate", {method: "POST"});
+        setSimulation((await res.json()) as Simulation);
         setBusy(false);
     };
 
@@ -345,6 +391,89 @@ function App() {
                             </tbody>
                         </table>
                     </div>
+                )}
+            </Card>
+
+            <Card className="mt-6">
+                <CardLabel>Notification channels</CardLabel>
+                {state.channels.length === 0 ? (
+                    <CardSub>none configured</CardSub>
+                ) : (
+                    <div className="mt-2 flex flex-col gap-2">
+                        {state.channels.map((c) => (
+                            <div key={c.name} className="flex items-center gap-3">
+                                <span className="w-20 text-[11px]">{c.name}</span>
+                                <Badge tone={c.enabled ? "ok" : "muted"}>
+                                    {c.enabled ? "enabled" : "muted"}
+                                </Badge>
+                                <span className="text-[10px] text-[var(--muted)]">
+                                    {c.minSeverity === "warning" ? "all alerts" : "critical only"}
+                                </span>
+                                <button
+                                    disabled={busy}
+                                    onClick={() =>
+                                        void post("notify/channel", {channel: c.name, enabled: !c.enabled})
+                                    }
+                                    style={btn}
+                                >
+                                    {c.enabled ? "Mute" : "Unmute"}
+                                </button>
+                                <button
+                                    disabled={busy}
+                                    onClick={() => void post("notify/test", {channel: c.name})}
+                                    style={btn}
+                                >
+                                    Send test
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+                {testResult && <CardSub>{testResult}</CardSub>}
+                <CardSub>
+                    A test bypasses both the severity filter and the mute switch — it goes straight
+                    to the channel.
+                </CardSub>
+            </Card>
+
+            <Card className="mt-6">
+                <CardLabel>Payout simulation</CardLabel>
+                <CardSub>
+                    Asks the node to build the real transaction with no private key, so it is
+                    returned unsigned and nothing can be spent.
+                </CardSub>
+                <div className="mt-3">
+                    <button
+                        disabled={busy || !state.simulationAvailable}
+                        onClick={() => void simulate()}
+                        style={btn}
+                    >
+                        Build unsigned transaction
+                    </button>
+                </div>
+                {simulation && (
+                    <>
+                        <CardSub>
+                            {simulation.recipientCount} recipient(s) ·{" "}
+                            <SignaAmount planck={simulation.totalPlanck}/> · fee{" "}
+                            <SignaAmount planck={simulation.feePlanck}/>
+                            {simulation.requiresOrdinarySend ? " · ordinary send (one recipient)" : ""}
+                        </CardSub>
+                        {!simulation.built && (
+                            <CardSub>{simulation.reason ?? simulation.error ?? "not built"}</CardSub>
+                        )}
+                        {simulation.transaction && (
+                            <pre
+                                className="mt-3 max-h-[360px] overflow-auto p-3 text-[10px] leading-relaxed"
+                                style={{
+                                    background: "var(--surface-tint)",
+                                    border: "1px solid var(--border)",
+                                }}
+                            >
+{JSON.stringify(simulation.transaction.transactionJSON, null, 2)}
+                            </pre>
+                        )}
+                    </>
                 )}
             </Card>
 

@@ -18,10 +18,14 @@ const snapshot = (localHeight: number): TestnetSnapshot => ({
   lastBlockId: HEAD.blockId,
 });
 
+const unusedHere = () => Promise.reject(new Error("not used by the probe"));
+
 const stubClient = (over: Partial<TestnetClient> = {}): TestnetClient => ({
   getSnapshot: async () => snapshot(980_544),
   getPeerCount: async () => 8,
   getHeadBlock: async () => HEAD,
+  buildUnsignedMultiOut: unusedHere,
+  buildUnsignedSend: unusedHere,
   ...over,
 });
 

@@ -2,6 +2,7 @@ import type { Ledger } from "../ledger/db.ts";
 import type { Channel } from "./channel.ts";
 import { severityAllows } from "./channel.ts";
 import { listUnnotifiedAlerts, markAlertNotified } from "../ledger/alerts.ts";
+import { isChannelEnabled } from "../ledger/channelState.ts";
 import { silentLogger, describeError } from "../log.ts";
 import type { Logger } from "../log.ts";
 
@@ -43,9 +44,15 @@ export function createNotifier(deps: NotifierDeps): Notifier {
         // event. The first is a config choice — email is critical-only by
         // default — and logging it as an error every flush would train an
         // operator to ignore the line that matters.
-        const eligible = deps.channels.filter((c) => severityAllows(c.minSeverity, alert.severity));
+        // Muting is checked per flush rather than at construction, so toggling a
+        // channel in the admin panel takes effect on the next flush instead of
+        // on the next restart.
+        const eligible = deps.channels.filter(
+          (c) =>
+            severityAllows(c.minSeverity, alert.severity) && isChannelEnabled(deps.db, c.name),
+        );
         if (eligible.length === 0) {
-          log.debug("no channel accepts this severity", {
+          log.debug("no enabled channel accepts this severity", {
             kind: alert.kind,
             severity: alert.severity,
           });

@@ -15,6 +15,11 @@ import { toChainDay } from "../domain/chainDay.ts";
 import { listOpenAlerts } from "../ledger/alerts.ts";
 import { setPayoutsPaused, clearKillSwitch, getKillSwitchReason } from "../ledger/state.ts";
 import { sumBroadcastSinceWallClock } from "../ledger/batches.ts";
+import { isChannelEnabled, setChannelEnabled } from "../ledger/channelState.ts";
+import { simulatePayout } from "../payout/simulate.ts";
+import type { PayoutSimulation } from "../payout/simulate.ts";
+import type { Channel } from "../notify/channel.ts";
+import { describeError } from "../log.ts";
 import index from "./index.html";
 
 export interface AdminServerDeps {
@@ -28,6 +33,14 @@ export interface AdminServerDeps {
   payoutSchedule: PayoutScheduleOptions;
   getHealth: () => HealthAssessment | undefined;
   getChainHead: () => ChainHead | undefined;
+  /** Configured channels, for the tester and the mute switches. */
+  channels: Channel[];
+  /**
+   * Turns the current dry run into an unsigned transaction. Takes the report
+   * rather than building it, so the panel simulates exactly the batch it is
+   * already displaying.
+   */
+  simulate?: (report: DryRunReport) => Promise<PayoutSimulation>;
   /** Absent when fork detection is disabled. */
   getForkState?: () => ForkState | undefined;
 }
@@ -125,6 +138,15 @@ function serialiseChain(db: Ledger, head: ChainHead | undefined) {
   };
 }
 
+/** Never exposes credentials: a channel is identified by name and nothing else. */
+function serialiseChannels(db: Ledger, channels: Channel[]) {
+  return channels.map((c) => ({
+    name: c.name,
+    minSeverity: c.minSeverity,
+    enabled: isChannelEnabled(db, c.name),
+  }));
+}
+
 export function createAdminServer(deps: AdminServerDeps): AdminServer {
   const startOfWallClockDay = () => {
     const d = new Date();
@@ -154,6 +176,19 @@ export function createAdminServer(deps: AdminServerDeps): AdminServer {
   const postOnly = (handler: () => Response) =>
     api((req) => (req.method === "POST" ? handler() : json({ error: "method not allowed" }, 405)));
 
+  /** POST with a JSON body. A malformed body is a 400, never a 500. */
+  const postJson = (handler: (body: Record<string, unknown>) => Promise<Response> | Response) =>
+    api(async (req) => {
+      if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+      let body: Record<string, unknown>;
+      try {
+        body = (await req.json()) as Record<string, unknown>;
+      } catch {
+        return json({ error: "expected a JSON body" }, 400);
+      }
+      return handler(body);
+    });
+
   const server = Bun.serve({
     hostname: deps.host,
     port: deps.port,
@@ -172,6 +207,8 @@ export function createAdminServer(deps: AdminServerDeps): AdminServer {
           }),
           health: deps.getHealth() ?? null,
           chain: serialiseChain(deps.db, deps.getChainHead()),
+          channels: serialiseChannels(deps.db, deps.channels),
+          simulationAvailable: Boolean(deps.simulate),
           fork: serialiseFork(deps.getForkState?.()),
           openAlerts: listOpenAlerts(deps.db),
           killSwitchReason: getKillSwitchReason(deps.db) ?? null,
@@ -187,6 +224,45 @@ export function createAdminServer(deps: AdminServerDeps): AdminServer {
         setPayoutsPaused(deps.db, false);
         return json({ ok: true, paused: false });
       }),
+      // Sends through the channel DIRECTLY rather than through the notifier: a
+      // test is an explicit act, so it deliberately bypasses both the severity
+      // filter and the mute switch. Testing credentials on a channel you have
+      // just muted is exactly when you need this.
+      "/api/notify/test": postJson(async (body) => {
+        const channel = deps.channels.find((c) => c.name === body.channel);
+        if (!channel) return json({ error: `unknown channel "${String(body.channel)}"` }, 404);
+        try {
+          await channel.send({
+            title: "[TEST] signum-testnet-rewards",
+            body: "Test notification from the admin panel. No alert is active.",
+            severity: "warning",
+          });
+          return json({ ok: true, channel: channel.name });
+        } catch (e) {
+          return json({ ok: false, channel: channel.name, error: describeError(e) });
+        }
+      }),
+
+      "/api/notify/channel": postJson((body) => {
+        const channel = deps.channels.find((c) => c.name === body.channel);
+        if (!channel) return json({ error: `unknown channel "${String(body.channel)}"` }, 404);
+        if (typeof body.enabled !== "boolean") {
+          return json({ error: "enabled must be a boolean" }, 400);
+        }
+        setChannelEnabled(deps.db, channel.name, body.enabled);
+        return json({ ok: true, channel: channel.name, enabled: body.enabled });
+      }),
+
+      "/api/payout/simulate": api(async (req) => {
+        if (req.method !== "POST") return json({ error: "method not allowed" }, 405);
+        if (!deps.simulate) return json({ error: "simulation unavailable" }, 503);
+        try {
+          return json(await deps.simulate(currentDryRun()));
+        } catch (e) {
+          return json({ built: false, error: describeError(e) }, 502);
+        }
+      }),
+
       "/api/kill-switch/clear": postOnly(() => {
         clearKillSwitch(deps.db);
         return json({ ok: true });

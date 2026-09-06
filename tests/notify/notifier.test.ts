@@ -5,6 +5,7 @@ import { openAlert, listUnnotifiedAlerts } from "../../src/ledger/alerts.ts";
 import { createNotifier } from "../../src/notify/notifier.ts";
 import type { Channel } from "../../src/notify/channel.ts";
 import type { Logger } from "../../src/log.ts";
+import { setChannelEnabled } from "../../src/ledger/channelState.ts";
 
 let db: Ledger;
 beforeEach(() => { db = openLedger(":memory:"); });
@@ -158,6 +159,50 @@ describe("notifier logging", () => {
     await notifier.flush();
 
     expect(lines.every((l) => l.level === "debug")).toBe(true);
+    expect(listUnnotifiedAlerts(db)).toHaveLength(1);
+  });
+});
+
+describe("muted channels", () => {
+  const channel = (name: string, sent: string[]): Channel => ({
+    name,
+    minSeverity: "warning",
+    send: async () => { sent.push(name); },
+  });
+
+  test("A MUTED CHANNEL DELIVERS NOTHING, even though it is configured", async () => {
+    openAlert(db, { kind: "low_peers", severity: "warning", message: "3 peers" });
+    const sent: string[] = [];
+    setChannelEnabled(db, "discord", false);
+
+    await createNotifier({
+      db,
+      channels: [channel("discord", sent), channel("telegram", sent)],
+    }).flush();
+
+    expect(sent).toEqual(["telegram"]);
+  });
+
+  test("muting is read per flush, so the panel takes effect without a restart", async () => {
+    const sent: string[] = [];
+    const notifier = createNotifier({ db, channels: [channel("discord", sent)] });
+
+    openAlert(db, { kind: "low_peers", severity: "warning", message: "first" });
+    await notifier.flush();
+    expect(sent).toEqual(["discord"]);
+
+    setChannelEnabled(db, "discord", false);
+    openAlert(db, { kind: "ws_degraded", severity: "warning", message: "second" });
+    await notifier.flush();
+    expect(sent).toEqual(["discord"]);
+  });
+
+  test("an alert nobody could receive stays queued for when a channel returns", async () => {
+    openAlert(db, { kind: "low_peers", severity: "warning", message: "3 peers" });
+    setChannelEnabled(db, "discord", false);
+
+    await createNotifier({ db, channels: [channel("discord", [])] }).flush();
+
     expect(listUnnotifiedAlerts(db)).toHaveLength(1);
   });
 });

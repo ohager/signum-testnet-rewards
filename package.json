@@ -23,6 +23,7 @@
   "dependencies": {
     "@libsql/client": "^0.18.0",
     "@signumjs/core": "^3.3.4",
+    "@signumjs/crypto": "^3.3.4",
     "@signumjs/util": "^3.3.4",
     "framer-motion": "^13.2.0",
     "pino": "^8.21.0",
