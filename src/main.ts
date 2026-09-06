@@ -86,7 +86,7 @@ const payoutPublicKey = config.payouts.accountSeed
   : undefined;
 boot.info(
   payoutPublicKey
-    ? "payout account configured; payout simulation available"
+    ? "payout account configured; payouts simulate against mainnet"
     : "no payout account seed; payout simulation will report it as unconfigured",
 );
 const wsMonitor = createWsMonitor(config.chain.testnetWsUrl);
@@ -183,8 +183,10 @@ const adminServer = createAdminServer({
       senderPublicKey: payoutPublicKey,
       fee: config.maxFee,
       deadlineMinutes: config.payouts.deadlineMinutes,
-      sendToMany: (args) => testnet.buildUnsignedMultiOut(args),
-      sendToOne: (args) => testnet.buildUnsignedSend(args),
+      // MAINNET: the reward is real SIGNA. Testnet is only where the work is
+      // observed; it is not where anyone gets paid.
+      sendToMany: (args) => mainnet.buildUnsignedMultiOut(args),
+      sendToOne: (args) => mainnet.buildUnsignedSend(args),
     }),
   getForkState: () => forkMonitor?.getState(),
 });

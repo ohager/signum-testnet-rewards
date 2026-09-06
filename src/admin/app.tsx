@@ -544,8 +544,9 @@ function App() {
             <Card className="mt-6">
                 <CardLabel>Payout simulation</CardLabel>
                 <CardSub>
-                    Asks the node to build the real transaction with no private key, so it is
-                    returned unsigned and nothing can be spent.
+                    Asks a MAINNET node to build the real payout with no private key, so it comes
+                    back unsigned and nothing can be spent. Rewards are real SIGNA; testnet is only
+                    where the work is observed.
                 </CardSub>
                 <div className="mt-3">
                     <button

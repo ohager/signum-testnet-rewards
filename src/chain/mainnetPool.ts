@@ -1,4 +1,20 @@
 import { LedgerClientFactory } from "@signumjs/core";
+import type { UnsignedTransaction } from "@signumjs/core";
+
+export interface UnsignedMultiOutArgs {
+  recipientAmounts: { recipient: string; amountNQT: string }[];
+  senderPublicKey: string;
+  feePlanck: string;
+  deadline: number;
+}
+
+export interface UnsignedSendArgs {
+  recipientId: string;
+  amountPlanck: string;
+  senderPublicKey: string;
+  feePlanck: string;
+  deadline: number;
+}
 
 export interface MainnetAccountResult {
   account: string;
@@ -9,6 +25,8 @@ export interface MainnetAccountResult {
 /** The narrow slice of a ledger client this pool needs. Injectable for tests. */
 export interface MainnetNodeClient {
   getAccount: (accountId: string) => Promise<MainnetAccountResult>;
+  buildUnsignedMultiOut: (args: UnsignedMultiOutArgs) => Promise<UnsignedTransaction>;
+  buildUnsignedSend: (args: UnsignedSendArgs) => Promise<UnsignedTransaction>;
 }
 
 export class AllNodesFailedError extends Error {
@@ -21,6 +39,20 @@ export class AllNodesFailedError extends Error {
 export interface MainnetPool {
   /** Returns undefined when the account does not exist on mainnet. */
   getAccount: (accountId: string) => Promise<MainnetAccountResult | undefined>;
+  /**
+   * Builds a payout WITHOUT signing or broadcasting it.
+   *
+   * Payouts live on MAINNET: miners forge on testnet, but the reward is real
+   * SIGNA, which is the whole reason eligibility requires an active mainnet
+   * account. Building this against the testnet node would model a transaction
+   * in a currency nobody wants.
+   *
+   * Failover is safe here precisely because no private key is passed: the call
+   * has no side effect, so retrying it on the next node cannot pay twice.
+   */
+  buildUnsignedMultiOut: (args: UnsignedMultiOutArgs) => Promise<UnsignedTransaction>;
+  /** The single-recipient fallback: signum-node rejects multi-out below two recipients. */
+  buildUnsignedSend: (args: UnsignedSendArgs) => Promise<UnsignedTransaction>;
 }
 
 /**
@@ -77,6 +109,8 @@ export function createMainnetPool(
         throw e;
       }
     },
+    buildUnsignedMultiOut: (args) => withFailover((c) => c.buildUnsignedMultiOut(args)),
+    buildUnsignedSend: (args) => withFailover((c) => c.buildUnsignedSend(args)),
   };
 }
 
@@ -91,5 +125,22 @@ function defaultClientFactory(host: string): MainnetNodeClient {
         balanceNQT: account.balanceNQT,
       };
     },
+    // No senderPrivateKey is passed, so SignumJS returns unsigned bytes instead
+    // of broadcasting. That omission is the entire safety mechanism.
+    buildUnsignedMultiOut: async (args) =>
+      (await ledger.transaction.sendAmountToMultipleRecipients({
+        recipientAmounts: args.recipientAmounts,
+        senderPublicKey: args.senderPublicKey,
+        feePlanck: args.feePlanck,
+        deadline: args.deadline,
+      })) as UnsignedTransaction,
+    buildUnsignedSend: async (args) =>
+      (await ledger.transaction.sendAmountToSingleRecipient({
+        recipientId: args.recipientId,
+        amountPlanck: args.amountPlanck,
+        senderPublicKey: args.senderPublicKey,
+        feePlanck: args.feePlanck,
+        deadline: args.deadline,
+      })) as UnsignedTransaction,
   };
 }

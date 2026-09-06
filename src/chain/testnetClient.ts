@@ -1,5 +1,4 @@
 import { LedgerClientFactory } from "@signumjs/core";
-import type { UnsignedTransaction } from "@signumjs/core";
 import { ChainTime } from "@signumjs/util";
 
 export interface TestnetSnapshot {
@@ -25,27 +24,6 @@ export interface HeadBlock {
 export interface TestnetClient {
   getSnapshot: () => Promise<TestnetSnapshot>;
   getPeerCount: () => Promise<number>;
-  /**
-   * Builds a multi-out payment WITHOUT signing or broadcasting it.
-   *
-   * No private key is passed, which is precisely what makes the node return
-   * unsigned bytes instead of spending anything.
-   */
-  buildUnsignedMultiOut: (args: {
-    recipientAmounts: { recipient: string; amountNQT: string }[];
-    senderPublicKey: string;
-    feePlanck: string;
-    deadline: number;
-  }) => Promise<UnsignedTransaction>;
-  /** The single-recipient fallback: signum-node rejects multi-out below two recipients. */
-  buildUnsignedSend: (args: {
-    recipientId: string;
-    amountPlanck: string;
-    senderPublicKey: string;
-    feePlanck: string;
-    deadline: number;
-  }) => Promise<UnsignedTransaction>;
-  /** Resolves the head block named by a snapshot, so both describe the same moment. */
   getHeadBlock: (blockId: string) => Promise<HeadBlock>;
 }
 
@@ -73,23 +51,6 @@ export function createTestnetClient(nodeHost: string): TestnetClient {
     async getPeerCount() {
       const peers = await ledger.network.getPeers();
       return peers.peers.length;
-    },
-    async buildUnsignedMultiOut(args) {
-      return (await ledger.transaction.sendAmountToMultipleRecipients({
-        recipientAmounts: args.recipientAmounts,
-        senderPublicKey: args.senderPublicKey,
-        feePlanck: args.feePlanck,
-        deadline: args.deadline,
-      })) as UnsignedTransaction;
-    },
-    async buildUnsignedSend(args) {
-      return (await ledger.transaction.sendAmountToSingleRecipient({
-        recipientId: args.recipientId,
-        amountPlanck: args.amountPlanck,
-        senderPublicKey: args.senderPublicKey,
-        feePlanck: args.feePlanck,
-        deadline: args.deadline,
-      })) as UnsignedTransaction;
     },
     async getHeadBlock(blockId: string) {
       // Fetched BY ID rather than by height: the snapshot already named the head,
