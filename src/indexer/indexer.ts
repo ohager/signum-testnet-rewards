@@ -11,6 +11,13 @@ export interface IndexerDeps {
   lookupMainnetAccount: (accountId: string) => Promise<MainnetAccountFacts | undefined>;
   isExcluded: (accountId: string) => boolean;
   onBlockObserved: (height: number) => void;
+  /**
+   * Fired once, when catch-up finishes and the walker goes live.
+   *
+   * onBlock fires for replayed history too, so anything that must not act on
+   * old blocks -- paying money, above all -- gates on this instead.
+   */
+  onCaughtUp?: () => void;
 }
 
 export interface Indexer {
@@ -45,6 +52,7 @@ export function createIndexer(deps: IndexerDeps): Indexer {
       // walk() resumes from the cached height when it exceeds startHeight, so a
       // restart continues where it left off rather than replaying everything.
       await walker.walk(deps.config.chain.startHeight);
+      deps.onCaughtUp?.();
       await walker.listen();
     },
     async stop() {

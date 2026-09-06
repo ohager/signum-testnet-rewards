@@ -11,6 +11,7 @@ import type { AdminServer } from "../../src/admin/server.ts";
 import { isPayoutsPaused, isKillSwitchTripped, tripKillSwitch } from "../../src/ledger/state.ts";
 import { recordBlockReward } from "../../src/ledger/blockRewards.ts";
 import type { MinerRow } from "../../src/publish/projection.ts";
+import type { RunOutcome } from "../../src/payout/runner.ts";
 
 let db: Ledger;
 let server: AdminServer;
@@ -455,5 +456,100 @@ describe("admin server payout account", () => {
     s.stop();
 
     expect(calls).toBe(1);
+  });
+});
+
+describe("admin server payout release", () => {
+  const runnerStub = (outcome: RunOutcome, calls: string[][] = []) => ({
+    release: async (expected?: string) => {
+      calls.push([expected ?? "(none)"]);
+      return outcome;
+    },
+    tick: async () => ({ kind: "none" as const }),
+    preview: () => {
+      throw new Error("unused");
+    },
+  });
+
+  const serverWith = (runner?: ReturnType<typeof runnerStub>) =>
+    createAdminServer({
+      db, token: TOKEN, host: "127.0.0.1", port: 0,
+      minPayout: Amount.fromSigna("5"),
+      rails: {
+        maxPerRecipientPerBatch: Amount.fromSigna("200"),
+        maxPerBatch: Amount.fromSigna("2000"),
+        maxPerWallClockDay: Amount.fromSigna("3000"),
+      },
+      globalDailyBudget: Amount.fromSigna("1000"),
+      payoutSchedule: { enabled: false, intervalSeconds: 6 * 3_600, serviceStartedAt: 1_800_000_000 },
+      getHealth: () => undefined,
+      getChainHead: () => undefined,
+      channels: [],
+      runner: runner as unknown as Parameters<typeof createAdminServer>[0]["runner"],
+      releaseMode: "armed",
+    });
+
+  const postRelease = (url: string, body: unknown) =>
+    fetch(`${url}/api/payout/release`, {
+      ...auth, method: "POST",
+      headers: { ...auth.headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+
+  test("forwards the approved total so the runner can refuse a changed batch", async () => {
+    const calls: string[][] = [];
+    const s = serverWith(runnerStub({ kind: "sent", batchId: 1, txId: "tx", totalPlanck: "500" }, calls));
+
+    const body = (await (await postRelease(s.url, { expectedTotalPlanck: "500" })).json()) as {
+      kind: string;
+    };
+    s.stop();
+
+    expect(body.kind).toBe("sent");
+    expect(calls).toEqual([["500"]]);
+  });
+
+  test("returns the runner's refusal verbatim", async () => {
+    const s = serverWith(runnerStub({ kind: "blocked", reason: "payouts are paused" }));
+    const body = (await (await postRelease(s.url, {})).json()) as { kind: string; reason: string };
+    s.stop();
+
+    expect(body).toEqual({ kind: "blocked", reason: "payouts are paused" });
+  });
+
+  test("rejects a non-string expected total rather than coercing it", async () => {
+    const s = serverWith(runnerStub({ kind: "blocked", reason: "x" }));
+    const res = await postRelease(s.url, { expectedTotalPlanck: 500 });
+    s.stop();
+
+    expect(res.status).toBe(400);
+  });
+
+  test("reports 503 when no runner is configured, never a silent success", async () => {
+    const s = serverWith(undefined);
+    const res = await postRelease(s.url, {});
+    s.stop();
+
+    expect(res.status).toBe(503);
+  });
+
+  test("requires a token like every other mutation", async () => {
+    const s = serverWith(runnerStub({ kind: "blocked", reason: "x" }));
+    const res = await fetch(`${s.url}/api/payout/release`, { method: "POST" });
+    s.stop();
+
+    expect(res.status).toBe(401);
+  });
+
+  test("GET /api/state exposes the release mode and availability", async () => {
+    const s = serverWith(runnerStub({ kind: "blocked", reason: "x" }));
+    const body = (await (await fetch(`${s.url}/api/state`, auth)).json()) as {
+      payout: { releaseMode: string; releaseAvailable: boolean; live: unknown };
+    };
+    s.stop();
+
+    expect(body.payout.releaseMode).toBe("armed");
+    expect(body.payout.releaseAvailable).toBe(true);
+    expect(body.payout.live).toBeNull();
   });
 });

@@ -3,7 +3,28 @@ import type { Ledger } from "./db.ts";
 import type { RecipientAmount } from "../domain/types.ts";
 import { fromPlanckInt } from "../domain/money.ts";
 
-export type BatchStatus = "pending" | "broadcast" | "confirmed" | "failed";
+/**
+ * A batch's life, in order.
+ *
+ *  claimed     accruals are stamped but nothing has been sent, or the send
+ *              threw and its outcome is unknown. The ONLY ambiguous state, and
+ *              the only one the chain reconciler has to resolve.
+ *  pending     accepted into a node's mempool: a transaction id exists.
+ *  confirming  included in a block, but fewer than the required confirmations.
+ *  confirmed   settled.
+ *  failed      released -- the accruals went back into the unpaid pool.
+ *
+ * `pending` means "in the mempool", not "not yet sent": once a transaction id
+ * exists the money is committed, and the states after it only describe how
+ * deeply it has settled.
+ */
+export type BatchStatus = "claimed" | "pending" | "confirming" | "confirmed" | "failed";
+
+/** Statuses where a transaction id exists, so the money has left or is leaving. */
+export const SPENT_STATUSES = ["pending", "confirming", "confirmed"] as const;
+
+/** Statuses still needing attention from the runner on each tick. */
+export const LIVE_STATUSES = ["claimed", "pending", "confirming"] as const;
 
 export class EmptyClaimError extends Error {
   constructor() {
@@ -32,6 +53,12 @@ export interface BatchRow {
   recipientCount: number | null;
   total: Amount | null;
   txId: string | null;
+  fullHash: string | null;
+  /** The node that accepted the broadcast; confirmation polling is pinned to it. */
+  broadcastHost: string | null;
+  broadcastAt: number | null;
+  confirmedHeight: number | null;
+  attemptCount: number;
   deadlineAt: number | null;
   /** Epoch seconds the payout was confirmed on chain; null until it is. */
   confirmedAt: number | null;
@@ -82,7 +109,7 @@ export function claimBatch(
     const insertBatch = db
       .query(
         `INSERT INTO batches (status, deadline_at, created_at, attempt_count)
-         VALUES ('pending', ?1, ?2, 0)`,
+         VALUES ('claimed', ?1, ?2, 0)`,
       )
       .run(params.deadlineAt, now);
     const batchId = Number(insertBatch.lastInsertRowid);
@@ -126,6 +153,72 @@ export function claimBatch(
   return run();
 }
 
+/**
+ * Records that a node accepted the broadcast.
+ *
+ * Written IMMEDIATELY after the send returns, because until this row exists the
+ * service cannot name the transaction it just paid with. `host` is part of the
+ * record, not incidental: every later confirmation check goes back to the same
+ * node, since a different one answering "unknown" may simply never have seen it.
+ */
+export function markBroadcast(
+  db: Ledger,
+  batchId: number,
+  tx: { txId: string; fullHash: string; host: string; feePlanck: number; broadcastAt: number },
+): void {
+  db.query(
+    `UPDATE batches
+        SET status = 'pending', tx_id = ?1, full_hash = ?2, broadcast_host = ?3,
+            fee_planck = ?4, broadcast_at = ?5
+      WHERE id = ?6`,
+  ).run(tx.txId, tx.fullHash, tx.host, tx.feePlanck, tx.broadcastAt, batchId);
+}
+
+/** The transaction made it into a block but is not deep enough yet. */
+export function markConfirming(db: Ledger, batchId: number, height: number): void {
+  db.query(`UPDATE batches SET status = 'confirming', confirmed_height = ?1 WHERE id = ?2`).run(
+    height,
+    batchId,
+  );
+}
+
+/** Terminal success: settled to the configured confirmation depth. */
+export function markConfirmed(
+  db: Ledger,
+  batchId: number,
+  at: { confirmedAt: number; height: number },
+): void {
+  db.query(
+    `UPDATE batches SET status = 'confirmed', confirmed_at = ?1, confirmed_height = ?2
+      WHERE id = ?3`,
+  ).run(at.confirmedAt, at.height, batchId);
+}
+
+/**
+ * The batch the runner still owes work on, if any.
+ *
+ * At most one exists by construction: nothing claims a new batch while this
+ * returns a row, which is what keeps "any outgoing transaction from the payout
+ * account in this window is ours" true for the reconciler.
+ */
+export function liveBatch(db: Ledger): BatchRow | undefined {
+  const row = db
+    .query(
+      `SELECT * FROM batches
+        WHERE status IN ('claimed','pending','confirming')
+        ORDER BY id DESC LIMIT 1`,
+    )
+    .get() as Record<string, unknown> | null;
+  return row ? toBatchRow(row) : undefined;
+}
+
+/** Counts an attempt that ended without a usable transaction. */
+export function recordAttempt(db: Ledger, batchId: number, error: string): void {
+  db.query(
+    `UPDATE batches SET attempt_count = attempt_count + 1, last_error = ?1 WHERE id = ?2`,
+  ).run(error, batchId);
+}
+
 /** Returns a failed batch's accruals to the unpaid pool so the next run retries them. */
 export function releaseBatch(db: Ledger, batchId: number, reason: string): void {
   const run = db.transaction(() => {
@@ -146,6 +239,11 @@ function toBatchRow(row: Record<string, unknown>): BatchRow {
     recipientCount: (row.recipient_count as number | null) ?? null,
     total: totalPlanck === null ? null : fromPlanckInt(totalPlanck),
     txId: (row.tx_id as string | null) ?? null,
+    fullHash: (row.full_hash as string | null) ?? null,
+    broadcastHost: (row.broadcast_host as string | null) ?? null,
+    broadcastAt: (row.broadcast_at as number | null) ?? null,
+    confirmedHeight: (row.confirmed_height as number | null) ?? null,
+    attemptCount: (row.attempt_count as number | null) ?? 0,
     deadlineAt: (row.deadline_at as number | null) ?? null,
     confirmedAt: (row.confirmed_at as number | null) ?? null,
     createdAt: row.created_at as number,
@@ -154,7 +252,8 @@ function toBatchRow(row: Record<string, unknown>): BatchRow {
 }
 
 const BATCH_COLUMNS =
-  `id, status, recipient_count, total_planck, tx_id, deadline_at, confirmed_at, created_at, last_error`;
+  `id, status, recipient_count, total_planck, tx_id, full_hash, broadcast_host, broadcast_at,
+   confirmed_height, attempt_count, deadline_at, confirmed_at, created_at, last_error`;
 
 export function getBatch(db: Ledger, batchId: number): BatchRow | undefined {
   const row = db
@@ -182,13 +281,19 @@ export function lastBatchCreatedAt(db: Ledger): number | undefined {
   return row.at ?? undefined;
 }
 
-/** Total actually sent today, wall-clock, for the per-day spend rail. */
+/**
+ * Total actually sent today, wall-clock, for the per-day spend rail.
+ *
+ * Counts every status that HAS a transaction id, not only settled ones: a
+ * transaction still in the mempool is money already committed, and leaving it
+ * out would let the daily rail authorise a second batch on top of it.
+ */
 export function sumBroadcastSinceWallClock(db: Ledger, sinceEpochSeconds: number): Amount {
   const row = db
     .query(
       `SELECT COALESCE(SUM(total_planck), 0) AS total
          FROM batches
-        WHERE status IN ('broadcast','confirmed') AND created_at >= ?1`,
+        WHERE status IN ('pending','confirming','confirmed') AND created_at >= ?1`,
     )
     .get(sinceEpochSeconds) as { total: number };
   return fromPlanckInt(row.total);

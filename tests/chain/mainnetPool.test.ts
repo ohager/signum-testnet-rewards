@@ -11,10 +11,15 @@ const unsigned = (host: string): UnsignedTransaction => ({
   requestProcessingTime: 1,
 });
 
+const unused = (what: string) => () => Promise.reject(new Error(`${what} not used in this test`));
+
 /** Fills the payout half of the interface for tests that only exercise lookups. */
 const noPayouts = {
-  buildUnsignedMultiOut: () => Promise.reject(new Error("not used in this test")),
-  buildUnsignedSend: () => Promise.reject(new Error("not used in this test")),
+  buildUnsignedMultiOut: unused("buildUnsignedMultiOut"),
+  buildUnsignedSend: unused("buildUnsignedSend"),
+  sendMultiOut: unused("sendMultiOut"),
+  sendSingle: unused("sendSingle"),
+  getTransaction: unused("getTransaction"),
 };
 
 const node = (
@@ -32,6 +37,9 @@ const node = (
     if (opts.fails) throw new Error("node down");
     return unsigned(opts.host ?? "node");
   },
+  sendMultiOut: unused("sendMultiOut"),
+  sendSingle: unused("sendSingle"),
+  getTransaction: unused("getTransaction"),
 });
 
 describe("createMainnetPool", () => {

@@ -14,11 +14,12 @@ import type { DryRunReport } from "../payout/dryRun.ts";
 import { toChainDay } from "../domain/chainDay.ts";
 import { listOpenAlerts } from "../ledger/alerts.ts";
 import { setPayoutsPaused, clearKillSwitch, getKillSwitchReason } from "../ledger/state.ts";
-import { sumBroadcastSinceWallClock } from "../ledger/batches.ts";
+import { sumBroadcastSinceWallClock, liveBatch } from "../ledger/batches.ts";
 import { isChannelEnabled, setChannelEnabled } from "../ledger/channelState.ts";
 import { simulatePayout } from "../payout/simulate.ts";
 import type { PayoutSimulation } from "../payout/simulate.ts";
 import type { PayoutAccountView } from "../payout/payoutAccount.ts";
+import type { PayoutRunner, ReleaseMode, RunOutcome } from "../payout/runner.ts";
 import type { Channel } from "../notify/channel.ts";
 import { describeError, silentLogger } from "../log.ts";
 import type { Logger } from "../log.ts";
@@ -54,6 +55,13 @@ export interface AdminServerDeps {
    * cache and refresh out of band.
    */
   getPayoutAccount?: () => PayoutAccountView;
+  /**
+   * The payout runner. Absent in a deployment with no runner wired, in which
+   * case the panel reports releasing as unavailable rather than offering a
+   * button that does nothing.
+   */
+  runner?: PayoutRunner;
+  releaseMode?: ReleaseMode;
 }
 
 export interface AdminServer {
@@ -149,6 +157,31 @@ function serialiseChain(db: Ledger, head: ChainHead | undefined) {
   };
 }
 
+/**
+ * The batch the runner still owes work on, or null.
+ *
+ * Reported even when it is merely waiting, because "a payout is in flight" is
+ * the reason the release button is refused, and an operator who cannot see it
+ * would read the refusal as a bug.
+ */
+function serialiseLiveBatch(db: Ledger) {
+  const batch = liveBatch(db);
+  if (!batch) return null;
+  return {
+    id: batch.id,
+    status: batch.status,
+    recipientCount: batch.recipientCount,
+    totalPlanck: batch.total ? batch.total.getPlanck() : null,
+    txId: batch.txId,
+    broadcastHost: batch.broadcastHost,
+    broadcastAt: batch.broadcastAt,
+    confirmedAt: batch.confirmedAt,
+    deadlineAt: batch.deadlineAt,
+    attemptCount: batch.attemptCount,
+    lastError: batch.lastError,
+  };
+}
+
 /** Never exposes credentials: a channel is identified by name and nothing else. */
 function serialiseChannels(db: Ledger, channels: Channel[]) {
   return channels.map((c) => ({
@@ -223,6 +256,11 @@ export function createAdminServer(deps: AdminServerDeps): AdminServer {
           simulationAvailable: Boolean(deps.simulate),
           fork: serialiseFork(deps.getForkState?.()),
           payoutAccount: deps.getPayoutAccount?.() ?? null,
+          payout: {
+            releaseMode: deps.releaseMode ?? null,
+            releaseAvailable: Boolean(deps.runner),
+            live: serialiseLiveBatch(deps.db),
+          },
           openAlerts: listOpenAlerts(deps.db),
           killSwitchReason: getKillSwitchReason(deps.db) ?? null,
           dryRun: serialiseDryRun(currentDryRun()),
@@ -264,6 +302,32 @@ export function createAdminServer(deps: AdminServerDeps): AdminServer {
         }
         setChannelEnabled(deps.db, channel.name, body.enabled);
         return json({ ok: true, channel: channel.name, enabled: body.enabled });
+      }),
+
+      /**
+       * Signs and broadcasts the batch currently on screen.
+       *
+       * POST-only and token-gated like every mutation here, and it forwards the
+       * operator's `expectedTotalPlanck` so the runner can refuse if a block
+       * landed between the panel rendering the batch and this call.
+       */
+      "/api/payout/release": postJson(async (body) => {
+        if (!deps.runner) return json({ error: "no payout runner is configured" }, 503);
+        const expected = body.expectedTotalPlanck;
+        if (expected !== undefined && typeof expected !== "string") {
+          return json({ error: "expectedTotalPlanck must be a planck string" }, 400);
+        }
+        let outcome: RunOutcome;
+        try {
+          outcome = await deps.runner.release(expected);
+        } catch (e) {
+          // A throw here is a bug, not a payout outcome. It must not read as a
+          // clean failure: the batch may be live and the reconciler owns it now.
+          log.error("release threw", { error: describeError(e) });
+          return json({ error: describeError(e) }, 500);
+        }
+        log.info("release requested", { outcome: outcome.kind });
+        return json(outcome);
       }),
 
       "/api/payout/simulate": api(async (req) => {

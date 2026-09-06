@@ -9,6 +9,12 @@ import {
   releaseBatch,
   getBatch,
   EmptyClaimError,
+  markBroadcast,
+  markConfirming,
+  markConfirmed,
+  liveBatch,
+  recordAttempt,
+  sumBroadcastSinceWallClock,
 } from "../../src/ledger/batches.ts";
 
 let db: Ledger;
@@ -67,7 +73,8 @@ describe("claimBatch", () => {
     const claimed = claimBatch(db, { recipientIds: ["acct-1", "acct-2"], deadlineAt: 999 });
     expect(claimed.total.getSigna()).toBe("15");
     expect(claimed.recipients).toHaveLength(2);
-    expect(getBatch(db, claimed.batchId)?.status).toBe("pending");
+    // "claimed" is pre-send: the accruals are stamped but nothing has been broadcast.
+    expect(getBatch(db, claimed.batchId)?.status).toBe("claimed");
   });
 
   test("EXCLUSIVITY: claimed accruals disappear from the unpaid pool", () => {
@@ -120,5 +127,106 @@ describe("releaseBatch", () => {
     const pool = aggregateUnpaidByRecipient(db);
     expect(pool).toHaveLength(1);
     expect(pool[0]?.amount.getSigna()).toBe("2.5");
+  });
+});
+
+describe("batch lifecycle", () => {
+  const claimOne = () => {
+    recordBlockReward(db, {
+      blockId: "lc1", height: 40, blockTimestamp: 500_000, chainDay: "2026-03-14",
+      generatorId: "acct-lc", generatorPublicKey: "pk", status: "accrued",
+      amount: Amount.fromSigna("12"),
+    });
+    return claimBatch(db, { recipientIds: ["acct-lc"], deadlineAt: 1_800_001_800 });
+  };
+
+  test("markBroadcast records the transaction and the host that accepted it", () => {
+    const { batchId } = claimOne();
+    markBroadcast(db, batchId, {
+      txId: "tx-1", fullHash: "hash-1", host: "https://europe.signum.network",
+      feePlanck: 1_000_000, broadcastAt: 1_800_000_100,
+    });
+
+    const row = getBatch(db, batchId)!;
+    expect(row.status).toBe("pending");
+    expect(row.txId).toBe("tx-1");
+    // The host is the point: every later check must go back to the same node.
+    expect(row.broadcastHost).toBe("https://europe.signum.network");
+    expect(row.broadcastAt).toBe(1_800_000_100);
+  });
+
+  test("markConfirming then markConfirmed walks the batch to settled", () => {
+    const { batchId } = claimOne();
+    markBroadcast(db, batchId, {
+      txId: "tx-2", fullHash: "h", host: "h1", feePlanck: 1, broadcastAt: 1,
+    });
+
+    markConfirming(db, batchId, 1_000_500);
+    expect(getBatch(db, batchId)?.status).toBe("confirming");
+
+    markConfirmed(db, batchId, { confirmedAt: 1_800_000_900, height: 1_000_500 });
+    const row = getBatch(db, batchId)!;
+    expect(row.status).toBe("confirmed");
+    expect(row.confirmedAt).toBe(1_800_000_900);
+    expect(row.confirmedHeight).toBe(1_000_500);
+  });
+
+  test("liveBatch reports work still owed and nothing once terminal", () => {
+    expect(liveBatch(db)).toBeUndefined();
+
+    const { batchId } = claimOne();
+    expect(liveBatch(db)?.id).toBe(batchId);
+
+    markBroadcast(db, batchId, {
+      txId: "tx-3", fullHash: "h", host: "h1", feePlanck: 1, broadcastAt: 1,
+    });
+    expect(liveBatch(db)?.id).toBe(batchId);
+
+    markConfirmed(db, batchId, { confirmedAt: 2, height: 3 });
+    expect(liveBatch(db)).toBeUndefined();
+  });
+
+  test("a released batch is not live and frees its accruals", () => {
+    const { batchId } = claimOne();
+    releaseBatch(db, batchId, "deadline expired");
+
+    expect(liveBatch(db)).toBeUndefined();
+    expect(getBatch(db, batchId)?.status).toBe("failed");
+    // Back in the pool, so the next cycle re-composes them.
+    expect(aggregateUnpaidByRecipient(db).some((a) => a.recipientId === "acct-lc")).toBe(true);
+  });
+
+  test("recordAttempt counts failures without changing status", () => {
+    const { batchId } = claimOne();
+    recordAttempt(db, batchId, "node rejected");
+    recordAttempt(db, batchId, "node rejected again");
+
+    const row = getBatch(db, batchId)!;
+    expect(row.attemptCount).toBe(2);
+    expect(row.lastError).toBe("node rejected again");
+    expect(row.status).toBe("claimed");
+  });
+
+  test("the daily rail counts mempool spend, not only settled batches", () => {
+    // A transaction in the mempool is money already committed. Leaving it out
+    // would let the rail authorise a second batch on top of it.
+    const { batchId } = claimOne();
+    // claimBatch stamps created_at from the real clock, so the window has to be
+    // anchored to the row rather than to a fixed constant.
+    const day = getBatch(db, batchId)!.createdAt;
+
+    expect(sumBroadcastSinceWallClock(db, day).getSigna()).toBe("0");
+
+    markBroadcast(db, batchId, {
+      txId: "tx-4", fullHash: "h", host: "h1", feePlanck: 1, broadcastAt: day + 10,
+    });
+    expect(sumBroadcastSinceWallClock(db, day).getSigna()).toBe("12");
+  });
+
+  test("a claimed batch does not count toward the daily rail", () => {
+    // Nothing has been sent yet, so counting it would inflate the day's spend
+    // for a batch that may still be released.
+    const { batchId } = claimOne();
+    expect(sumBroadcastSinceWallClock(db, getBatch(db, batchId)!.createdAt).getSigna()).toBe("0");
   });
 });

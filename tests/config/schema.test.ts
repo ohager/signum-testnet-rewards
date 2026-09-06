@@ -212,3 +212,21 @@ describe("parseConfig", () => {
     expect(parseConfig(env).notify.email).toBeUndefined();
   });
 });
+
+describe("payout release mode", () => {
+  test("defaults to armed when unset, never to auto", () => {
+    // An unset value must not mean "send money unattended".
+    const { PAYOUT_RELEASE_MODE, ...rest } = validEnv();
+    expect(parseConfig(rest).payouts.releaseMode).toBe("armed");
+  });
+
+  test("accepts auto explicitly", () => {
+    expect(parseConfig({ ...validEnv(), PAYOUT_RELEASE_MODE: "auto" }).payouts.releaseMode).toBe("auto");
+  });
+
+  test("rejects anything else rather than falling back silently", () => {
+    expect(() => parseConfig({ ...validEnv(), PAYOUT_RELEASE_MODE: "yes" })).toThrow(
+      /PAYOUT_RELEASE_MODE/,
+    );
+  });
+});

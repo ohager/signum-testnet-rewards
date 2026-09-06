@@ -5,6 +5,9 @@ import {Card, CardLabel, CardSub} from "./components/Card";
 import {Badge, type Tone} from "./components/Badge";
 import {SignaAmount} from "./components/SignaAmount";
 import {SignumLogo} from "./components/SignumLogo";
+import {AccountId, short, relative, btn} from "./components/display";
+import {PayoutAccountCard, PayoutReleaseCard} from "./components/PayoutCards";
+import type {LiveBatch, PayoutAccountRow, PayoutState} from "./components/PayoutCards";
 
 /** The token is supplied via the URL once, then kept in memory only. */
 const token = new URLSearchParams(location.search).get("token") ?? "";
@@ -43,14 +46,8 @@ interface HeadBlock {
     observedAt: number;
 }
 
-interface PayoutAccountRow {
-    accountId: string;
-    accountRS: string;
-    balancePlanck: string | null;
-    existsOnChain: boolean | null;
-    checkedAt: number | null;
-    error: string | null;
-}
+
+
 
 interface ChannelRow {
     name: string;
@@ -75,6 +72,7 @@ interface State {
     simulationAvailable: boolean;
     /** Null when PAYOUT_ACCOUNT_SEED is unset: there is no account to report. */
     payoutAccount: PayoutAccountRow | null;
+    payout: PayoutState;
     chain: {
         head: HeadBlock | null;
         indexed: { height: number; blockId: string; generatorRS: string } | null;
@@ -127,126 +125,11 @@ const stamp = (epochSeconds: number) => new Date(epochSeconds * 1000).toLocaleSt
  * readers, and having to convert between them by hand is the whole friction
  * this replaces.
  */
-function AccountId({rs, id}: { rs: string; id: string }) {
-    return (
-        <span>
-            {rs} <span style={{color: "var(--muted)", fontSize: "0.85em"}}>({id})</span>
-        </span>
-    );
-}
 
-/**
- * The account the money leaves FROM, and whether it can cover what we are about
- * to send.
- *
- * Two things are deliberately kept apart here. The address is derived locally
- * from the payout public key, so it is shown unconditionally — "which account
- * do we pay from" has an answer even with every mainnet node unreachable. The
- * balance is a mainnet reading and may be missing, ageing or stale, and says so.
- *
- * MAINNET, throughout. Every other account on this panel is a testnet forger;
- * this one is where real SIGNA is spent from, which is why the address is
- * rendered with its `S-` prefix and labelled.
- */
-function PayoutAccountCard(
-    {account, dueTotalPlanck, now}: {
-        account: PayoutAccountRow | null;
-        dueTotalPlanck: string;
-        now: number;
-    },
-) {
-    if (!account) {
-        return (
-            <Card>
-                <CardLabel>Payout account</CardLabel>
-                <Badge tone="warn">not configured</Badge>
-                <CardSub>
-                    PAYOUT_ACCOUNT_SEED is unset, so no account is derived and nothing can be
-                    signed.
-                </CardSub>
-            </Card>
-        );
-    }
 
-    const balance = account.balancePlanck === null ? null : BigInt(account.balancePlanck);
-    const due = BigInt(dueTotalPlanck);
-    // Excludes the network fee, so "covers" is a necessary condition and not a
-    // sufficient one. Overstating it would be worse than leaving the fee out.
-    const shortfall = balance !== null && due > 0n && balance < due ? due - balance : null;
 
-    return (
-        <Card>
-            <CardLabel>Payout account — mainnet</CardLabel>
 
-            {balance === null ? (
-                <p className="text-[22px]" style={{fontFamily: "var(--font-display)"}}>
-                    <span style={{color: "var(--muted)"}}>checking…</span>
-                </p>
-            ) : (
-                <p className="text-[26px]" style={{fontFamily: "var(--font-display)"}}>
-                    <SignaAmount planck={String(balance)}/>
-                </p>
-            )}
 
-            <div className="mt-1 flex flex-wrap gap-2">
-                {account.existsOnChain === false && <Badge tone="crit">not on chain</Badge>}
-                {shortfall !== null && <Badge tone="crit">short of next batch</Badge>}
-                {account.error !== null && <Badge tone="warn">balance stale</Badge>}
-            </div>
-
-            <CardSub>
-                <AccountId rs={account.accountRS} id={account.accountId}/>
-            </CardSub>
-
-            {shortfall !== null && (
-                <CardSub>
-                    short by <SignaAmount planck={String(shortfall)}/> of the{" "}
-                    <SignaAmount planck={dueTotalPlanck}/> dry run, before fees
-                </CardSub>
-            )}
-
-            {account.existsOnChain === false && (
-                <CardSub>
-                    mainnet has no such account: it has never received anything, so it holds
-                    nothing and cannot pay
-                </CardSub>
-            )}
-
-            {account.error !== null && <CardSub>last lookup failed: {account.error}</CardSub>}
-
-            <CardSub>
-                {account.checkedAt === null
-                    ? "no successful balance lookup yet"
-                    : `balance read ${relative(account.checkedAt, now)}`}
-            </CardSub>
-        </Card>
-    );
-}
-
-/** Signatures and block ids are 64 hex chars; only the ends identify them by eye. */
-const short = (hex: string) => (hex.length > 20 ? `${hex.slice(0, 10)}…${hex.slice(-6)}` : hex);
-
-/**
- * "in 3h 20m" / "5m ago". Coarse on purpose: the next payout is a schedule, not
- * a countdown, and second-precision would imply an accuracy the runner has not
- * promised.
- */
-function relative(epochSeconds: number, nowSeconds: number): string {
-    const delta = epochSeconds - nowSeconds;
-    const mins = Math.floor(Math.abs(delta) / 60);
-    const text = mins < 60 ? `${mins}m` : `${Math.floor(mins / 60)}h ${mins % 60}m`;
-    return delta >= 0 ? `in ${text}` : `${text} ago`;
-}
-
-const btn: React.CSSProperties = {
-    border: "1px solid var(--border2)",
-    color: "var(--blue2)",
-    background: "var(--surface-tint)",
-    padding: "8px 16px",
-    fontSize: 10,
-    letterSpacing: 2,
-    textTransform: "uppercase",
-};
 
 /**
  * Catches a render-time throw and shows what happened.
@@ -298,6 +181,9 @@ function App() {
     const [busy, setBusy] = useState(false);
     const [testResult, setTestResult] = useState<string | undefined>();
     const [simulation, setSimulation] = useState<Simulation | undefined>();
+    const [releaseResult, setReleaseResult] = useState<string | undefined>();
+    // Two-step, because the click is irreversible and moves real money.
+    const [confirmRelease, setConfirmRelease] = useState(false);
     const [fetchError, setFetchError] = useState<string | undefined>();
 
     /**
@@ -361,6 +247,46 @@ function App() {
             setTestResult(`request failed: ${e instanceof Error ? e.message : String(e)}`);
         } finally {
             setBusy(false);
+        }
+    };
+
+    /**
+     * Releases the batch.
+     *
+     * Reports the runner's outcome verbatim rather than a generic "done": the
+     * difference between `sent`, `blocked` and `send-failed` is the difference
+     * between money gone, nothing happened, and outcome unknown, and only the
+     * middle one is safe to shrug at.
+     */
+    const release = async (expectedTotalPlanck: string) => {
+        setBusy(true);
+        setReleaseResult(undefined);
+        try {
+            const res = await api("payout/release", {
+                method: "POST",
+                headers: {"content-type": "application/json"},
+                body: JSON.stringify({expectedTotalPlanck}),
+            });
+            const out = (await res.json()) as {
+                kind?: string; reason?: string; txId?: string; error?: string;
+            };
+            if (out.error) setReleaseResult(`failed: ${out.error}`);
+            else if (out.kind === "sent") setReleaseResult(`sent — tx ${out.txId}`);
+            else if (out.kind === "blocked") setReleaseResult(`blocked: ${out.reason}`);
+            else if (out.kind === "send-failed")
+                setReleaseResult("send failed — outcome unknown, the reconciler will resolve it");
+            else setReleaseResult(out.kind ?? "unknown outcome");
+            await refresh();
+        } catch (e) {
+            // A network failure here says nothing about whether the payout went
+            // out; the batch state on the next refresh does.
+            setReleaseResult(
+                `request failed — check the batch state: ${e instanceof Error ? e.message : String(e)}`,
+            );
+            await refresh();
+        } finally {
+            setBusy(false);
+            setConfirmRelease(false);
         }
     };
 
@@ -566,6 +492,18 @@ function App() {
                 <PayoutAccountCard
                     account={state.payoutAccount}
                     dueTotalPlanck={state.dryRun.totalPlanck}
+                    now={now}
+                />
+
+                <PayoutReleaseCard
+                    payout={state.payout}
+                    dryRun={state.dryRun}
+                    busy={busy}
+                    confirming={confirmRelease}
+                    result={releaseResult}
+                    onArm={() => setConfirmRelease(true)}
+                    onCancel={() => setConfirmRelease(false)}
+                    onRelease={release}
                     now={now}
                 />
             </div>

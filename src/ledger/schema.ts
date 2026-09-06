@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS batches (
   fee_planck       INTEGER,
   tx_id            TEXT,
   full_hash        TEXT,
+  -- The node that accepted the broadcast. Confirmation polling is PINNED to it:
+  -- a different node answering "unknown transaction" may simply not have seen
+  -- it yet, and acting on that would release accruals that are still in flight.
+  broadcast_host   TEXT,
   deadline_at      INTEGER,
   broadcast_at     INTEGER,
   confirmed_at     INTEGER,
@@ -105,3 +109,14 @@ CREATE INDEX IF NOT EXISTS ix_fork_time ON fork_observations(checked_at);
 CREATE VIEW IF NOT EXISTS unpaid_accruals AS
   SELECT * FROM block_rewards WHERE status = 'accrued' AND batch_id IS NULL;
 `;
+
+/**
+ * Columns added after the first release.
+ *
+ * SCHEMA_SQL only runs CREATE TABLE IF NOT EXISTS, which is a no-op against a
+ * table that already exists — so a new column has to be added explicitly for
+ * databases created before it existed. Applied idempotently by openLedger.
+ */
+export const ADDED_COLUMNS: { table: string; column: string; ddl: string }[] = [
+  { table: "batches", column: "broadcast_host", ddl: "ALTER TABLE batches ADD COLUMN broadcast_host TEXT" },
+];

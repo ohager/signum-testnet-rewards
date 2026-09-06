@@ -21,6 +21,11 @@ import { createTursoPublisher } from "./publish/tursoPublisher.ts";
 import { createAdminServer } from "./admin/server.ts";
 import { simulatePayout } from "./payout/simulate.ts";
 import { createPayoutAccountWatcher } from "./payout/payoutAccount.ts";
+import { createPayoutRunner } from "./payout/runner.ts";
+import { openAlert } from "./ledger/alerts.ts";
+import { computePayoutSchedule } from "./payout/schedule.ts";
+import { isPayoutsPaused, isKillSwitchTripped } from "./ledger/state.ts";
+import { lastBatchCreatedAt } from "./ledger/batches.ts";
 import { generateSignKeys } from "@signumjs/crypto";
 import { toChainDay } from "./domain/chainDay.ts";
 import { ChainTime } from "@signumjs/util";
@@ -83,16 +88,25 @@ boot.info("notification channels", { channels: channels.map((c) => c.name).join(
 
 const notifier = createNotifier({ db, channels, log: log.child("notify") });
 
-// The public key is derived from the seed so the simulator can ask the node to
-// build a real transaction. The seed itself never leaves this scope, and the
-// private key is never derived at all: an unsigned transaction needs neither.
-const payoutPublicKey = config.payouts.accountSeed
-  ? generateSignKeys(config.payouts.accountSeed).publicKey
+/**
+ * The payout keypair, derived once from the seed.
+ *
+ * The signing key IS derived now that the runner broadcasts real payouts -- it
+ * previously was not, when the service could only simulate. The seed itself
+ * still never leaves this scope, and neither key is logged, published or
+ * exposed by the admin API: the panel only ever sees the derived address.
+ */
+const payoutKeys = config.payouts.accountSeed
+  ? (() => {
+      const k = generateSignKeys(config.payouts.accountSeed);
+      return { publicKey: k.publicKey, signPrivateKey: k.signPrivateKey };
+    })()
   : undefined;
+const payoutPublicKey = payoutKeys?.publicKey;
 boot.info(
   payoutPublicKey
-    ? "payout account configured; payouts simulate against mainnet"
-    : "no payout account seed; payout simulation will report it as unconfigured",
+    ? "payout account configured"
+    : "no payout account seed; payouts and simulation will report it as unconfigured",
 );
 
 // The balance is refreshed a good deal more slowly than the admin panel polls.
@@ -172,13 +186,96 @@ if (publisher) {
   }
 }
 
+const payoutLog = log.child("payout");
+
+/**
+ * The runner. Present whenever a seed is configured, INCLUDING when payouts are
+ * disabled: the gate then refuses every release with a reason, which is a more
+ * useful panel than one with no runner at all.
+ */
+const payoutRunner = payoutKeys
+  ? createPayoutRunner({
+      db,
+      pool: mainnet,
+      minPayout: config.minPayout,
+      rails: config.rails,
+      fee: config.maxFee,
+      deadlineMinutes: config.payouts.deadlineMinutes,
+      confirmationsRequired: config.payouts.confirmationsRequired,
+      payoutsEnabled: config.payouts.enabled,
+      keys: payoutKeys,
+      nowEpochSeconds: () => Math.floor(Date.now() / 1000),
+      log: payoutLog,
+      onAlert: (kind, message) => openAlert(db, { kind, severity: "critical", message }),
+    })
+  : undefined;
+boot.info(
+  payoutRunner
+    ? `payout runner ready in ${config.payouts.releaseMode} mode`
+    : "no payout runner: PAYOUT_ACCOUNT_SEED is unset",
+);
+
+// True once the walker has finished catching up. Payout work is gated on it so
+// replaying historical testnet blocks cannot trigger or advance a payout.
+let chainCaughtUp = false;
+// One payout pass at a time. The walker AWAITS onBlock, so the pass is
+// dispatched rather than awaited: a mainnet failover must never stall testnet
+// indexing, and a slow pass must never overlap itself.
+let payoutBusy = false;
+
+function onChainTick(): void {
+  if (!payoutRunner || !chainCaughtUp || payoutBusy) return;
+  payoutBusy = true;
+  void (async () => {
+    try {
+      // Always reconcile: confirmations advance on mainnet whether or not a new
+      // payout is due, and this is the only thing that moves a batch forward.
+      const reconciled = await payoutRunner.tick();
+      if (reconciled.kind !== "none" && reconciled.kind !== "waiting") {
+        payoutLog.info("batch reconciled", reconciled);
+      }
+      if (config.payouts.releaseMode !== "auto") return;
+      if (!payoutDue()) return;
+
+      const outcome = await payoutRunner.release();
+      if (outcome.kind !== "blocked") payoutLog.info("auto release", { outcome: outcome.kind });
+    } catch (e) {
+      // A throw here would otherwise be an unhandled rejection inside a
+      // fire-and-forget task, which would take the process down.
+      payoutLog.error("payout pass failed", { error: describeError(e) });
+    } finally {
+      payoutBusy = false;
+    }
+  })();
+}
+
+/** Whether the schedule says a cycle is owed, using the same clock as the panel. */
+function payoutDue(): boolean {
+  return computePayoutSchedule({
+    enabled: config.payouts.enabled,
+    paused: isPayoutsPaused(db),
+    killSwitch: isKillSwitchTripped(db),
+    lastRunAt: lastBatchCreatedAt(db),
+    serviceStartedAt,
+    intervalSeconds: config.payouts.intervalMinutes * 60,
+    nowEpochSeconds: Math.floor(Date.now() / 1000),
+  }).due;
+}
+
 const indexer = createIndexer({
   db,
   config,
   walkerCachePath: paths.walkerCachePath,
   lookupMainnetAccount,
   isExcluded: () => false,
-  onBlockObserved: () => {},
+  // Payout work rides the chain heartbeat rather than a timer of its own: it
+  // then cannot run while the service is not observing testnet, which is
+  // exactly when it should not be paying for testnet work.
+  onBlockObserved: () => onChainTick(),
+  onCaughtUp: () => {
+    chainCaughtUp = true;
+    payoutLog.info("chain caught up; payout ticks enabled");
+  },
 });
 
 const adminServer = createAdminServer({
@@ -209,6 +306,8 @@ const adminServer = createAdminServer({
       sendToOne: (args) => mainnet.buildUnsignedSend(args),
     }),
   getForkState: () => forkMonitor?.getState(),
+  runner: payoutRunner,
+  releaseMode: config.payouts.releaseMode,
   getPayoutAccount: payoutAccount && (() => payoutAccount.get()),
 });
 boot.info("admin UI listening", { url: adminServer.url });

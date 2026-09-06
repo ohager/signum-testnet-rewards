@@ -3,6 +3,7 @@ import type { RewardPolicyConfig } from "../domain/policy.ts";
 import type { RailsConfig } from "../domain/rails.ts";
 import { toPlanckInt, MoneyError } from "../domain/money.ts";
 import type { Severity } from "../ledger/alerts.ts";
+import type { ReleaseMode } from "../payout/runner.ts";
 
 export class ConfigError extends Error {
   constructor(problems: string[]) {
@@ -33,6 +34,12 @@ export interface AppConfig {
     intervalMinutes: number;
     deadlineMinutes: number;
     confirmationsRequired: number;
+    /**
+     * Who starts a payout. `armed` composes the batch and waits for an operator
+     * to release it; `auto` sends on the schedule. The payout itself is the
+     * same either way.
+     */
+    releaseMode: ReleaseMode;
     accountSeed: string | undefined;
   };
   health: {
@@ -209,6 +216,13 @@ export function parseConfig(env: Env): AppConfig {
   // reference nodes and simply have no fork detection, rather than not start.
   const referenceNodeHosts = hostList(env.TESTNET_REFERENCE_NODE_HOSTS);
 
+  // Defaults to `armed`: an unset value must never mean "send money unattended".
+  const releaseModeRaw = (env.PAYOUT_RELEASE_MODE ?? "armed").trim() || "armed";
+  if (releaseModeRaw !== "armed" && releaseModeRaw !== "auto") {
+    problems.push(`PAYOUT_RELEASE_MODE must be "armed" or "auto", got "${releaseModeRaw}"`);
+  }
+  const releaseMode: ReleaseMode = releaseModeRaw === "auto" ? "auto" : "armed";
+
   const payoutsEnabled = bool("PAYOUTS_ENABLED");
   const accountSeed = env.PAYOUT_ACCOUNT_SEED?.trim() || undefined;
   if (payoutsEnabled && !accountSeed) {
@@ -281,6 +295,7 @@ export function parseConfig(env: Env): AppConfig {
       intervalMinutes: int("PAYOUT_INTERVAL_MINUTES"),
       deadlineMinutes: int("TX_DEADLINE_MINUTES"),
       confirmationsRequired: int("CONFIRMATIONS_REQUIRED"),
+      releaseMode,
       accountSeed,
     },
     health: {
