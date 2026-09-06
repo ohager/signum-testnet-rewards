@@ -316,4 +316,78 @@ describe("admin server routes", () => {
     expect(res.status).toBe(401);
     expect(sent).toEqual([]);
   });
+
+  test("A THROWING ROUTE IS A JSON 500, not a leaked stack", async () => {
+    // getHealth is called while assembling /api/state; a throw there stands in
+    // for any unexpected failure inside a route.
+    const broken = createAdminServer({
+      db, token: TOKEN, host: "127.0.0.1", port: 0,
+      minPayout: Amount.fromSigna("5"),
+      rails: {
+        maxPerRecipientPerBatch: Amount.fromSigna("200"),
+        maxPerBatch: Amount.fromSigna("2000"),
+        maxPerWallClockDay: Amount.fromSigna("3000"),
+      },
+      globalDailyBudget: Amount.fromSigna("1000"),
+      payoutSchedule: { enabled: false, intervalSeconds: 6 * 3_600, serviceStartedAt: 1_800_000_000 },
+      getHealth: () => { throw new Error("secret internal detail"); },
+      getChainHead: () => undefined,
+      channels: [],
+    });
+
+    const res = await fetch(`${broken.url}/api/state`, auth);
+    const text = await res.text();
+    broken.stop();
+
+    expect(res.status).toBe(500);
+    expect(JSON.parse(text)).toEqual({ error: "internal error" });
+    expect(text).not.toContain("secret internal detail");
+  });
+
+  test("a failing simulation is a 502 carrying the reason, not a crash", async () => {
+    const failing = createAdminServer({
+      db, token: TOKEN, host: "127.0.0.1", port: 0,
+      minPayout: Amount.fromSigna("5"),
+      rails: {
+        maxPerRecipientPerBatch: Amount.fromSigna("200"),
+        maxPerBatch: Amount.fromSigna("2000"),
+        maxPerWallClockDay: Amount.fromSigna("3000"),
+      },
+      globalDailyBudget: Amount.fromSigna("1000"),
+      payoutSchedule: { enabled: false, intervalSeconds: 6 * 3_600, serviceStartedAt: 1_800_000_000 },
+      getHealth: () => undefined,
+      getChainHead: () => undefined,
+      channels: [],
+      simulate: async () => { throw new Error("node unreachable"); },
+    });
+
+    const res = await fetch(`${failing.url}/api/payout/simulate`, { ...auth, method: "POST" });
+    const body = (await res.json()) as { built: boolean; error: string };
+    failing.stop();
+
+    expect(res.status).toBe(502);
+    expect(body).toEqual({ built: false, error: "node unreachable" });
+  });
+
+  test("simulation is reported unavailable rather than pretending", async () => {
+    const noSim = createAdminServer({
+      db, token: TOKEN, host: "127.0.0.1", port: 0,
+      minPayout: Amount.fromSigna("5"),
+      rails: {
+        maxPerRecipientPerBatch: Amount.fromSigna("200"),
+        maxPerBatch: Amount.fromSigna("2000"),
+        maxPerWallClockDay: Amount.fromSigna("3000"),
+      },
+      globalDailyBudget: Amount.fromSigna("1000"),
+      payoutSchedule: { enabled: false, intervalSeconds: 6 * 3_600, serviceStartedAt: 1_800_000_000 },
+      getHealth: () => undefined,
+      getChainHead: () => undefined,
+      channels: [],
+    });
+
+    const res = await fetch(`${noSim.url}/api/payout/simulate`, { ...auth, method: "POST" });
+    noSim.stop();
+
+    expect(res.status).toBe(503);
+  });
 });

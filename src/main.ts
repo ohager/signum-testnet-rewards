@@ -177,6 +177,7 @@ const adminServer = createAdminServer({
   getHealth: () => healthMonitor.getLatest(),
   getChainHead: () => healthMonitor.getChainHead(),
   channels,
+  log: log.child("admin"),
   simulate: (report) =>
     simulatePayout(report, {
       senderPublicKey: payoutPublicKey,
@@ -260,6 +261,17 @@ async function shutdown(signal: string) {
 }
 process.on("SIGINT", () => void shutdown("SIGINT"));
 process.on("SIGTERM", () => void shutdown("SIGTERM"));
+
+// Logged, then left to fail. A process in an unknown state must not keep
+// signing off on money, and pm2 restarts it cleanly — but the reason has to
+// reach the log first, or a restart loop is silent.
+process.on("unhandledRejection", (reason) => {
+  log.error("unhandled promise rejection", { error: describeError(reason) });
+});
+process.on("uncaughtException", (e) => {
+  log.error("uncaught exception; exiting", { error: describeError(e) });
+  process.exit(1);
+});
 
 // Runs until stopped. walk() catches up, then listen() takes over.
 await indexer.run();

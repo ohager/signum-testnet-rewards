@@ -19,7 +19,8 @@ import { isChannelEnabled, setChannelEnabled } from "../ledger/channelState.ts";
 import { simulatePayout } from "../payout/simulate.ts";
 import type { PayoutSimulation } from "../payout/simulate.ts";
 import type { Channel } from "../notify/channel.ts";
-import { describeError } from "../log.ts";
+import { describeError, silentLogger } from "../log.ts";
+import type { Logger } from "../log.ts";
 import index from "./index.html";
 
 export interface AdminServerDeps {
@@ -35,6 +36,7 @@ export interface AdminServerDeps {
   getChainHead: () => ChainHead | undefined;
   /** Configured channels, for the tester and the mute switches. */
   channels: Channel[];
+  log?: Logger;
   /**
    * Turns the current dry run into an unsigned transaction. Takes the report
    * rather than building it, so the panel simulates exactly the batch it is
@@ -148,6 +150,7 @@ function serialiseChannels(db: Ledger, channels: Channel[]) {
 }
 
 export function createAdminServer(deps: AdminServerDeps): AdminServer {
+  const log = deps.log ?? silentLogger();
   const startOfWallClockDay = () => {
     const d = new Date();
     d.setUTCHours(0, 0, 0, 0);
@@ -275,6 +278,18 @@ export function createAdminServer(deps: AdminServerDeps): AdminServer {
         return json({ error: "not found" }, 404);
       }
       return json({ error: "not found" }, 404);
+    },
+    /**
+     * Last line of defence for a throwing route.
+     *
+     * Bun's default is a 500 whose stack goes to stdout outside our logger, and
+     * whose body shape the panel cannot parse. This keeps the response JSON, so
+     * the panel reports something useful, and puts the cause in the log where
+     * the rest of the service's errors are.
+     */
+    error(err) {
+      log.error("unhandled error in an admin route", { error: describeError(err) });
+      return json({ error: "internal error" }, 500);
     },
   });
 

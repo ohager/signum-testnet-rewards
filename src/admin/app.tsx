@@ -1,4 +1,5 @@
-import {useEffect, useState} from "react";
+import {Component, useEffect, useState} from "react";
+import type {ErrorInfo, ReactNode} from "react";
 import {createRoot} from "react-dom/client";
 import {Card, CardLabel, CardSub} from "./components/Card";
 import {Badge, type Tone} from "./components/Badge";
@@ -135,52 +136,147 @@ const btn: React.CSSProperties = {
     textTransform: "uppercase",
 };
 
+/**
+ * Catches a render-time throw and shows what happened.
+ *
+ * Without one, React unmounts the whole tree on any error and leaves a blank
+ * page — the single worst outcome for an operations panel, because a blank page
+ * looks identical to a dead service. The panel polls every five seconds, so an
+ * error here is usually a shape mismatch against a newer API rather than
+ * something a retry fixes; the message and a reload are the useful response.
+ */
+class ErrorBoundary extends Component<{children: ReactNode}, {error: Error | undefined}> {
+    override state: {error: Error | undefined} = {error: undefined};
+
+    static getDerivedStateFromError(error: Error) {
+        return {error};
+    }
+
+    override componentDidCatch(error: Error, info: ErrorInfo) {
+        console.error("admin panel crashed", error, info.componentStack);
+    }
+
+    override render() {
+        const {error} = this.state;
+        if (!error) return this.props.children;
+        return (
+            <main
+                className="min-h-screen p-6"
+                style={{background: "var(--bg)", color: "var(--text)", fontFamily: "var(--font-body)"}}
+            >
+                <Card>
+                    <CardLabel>Admin panel error</CardLabel>
+                    <Badge tone="crit">crashed</Badge>
+                    <CardSub>{error.message}</CardSub>
+                    <CardSub>
+                        The service itself is unaffected: this is the panel only. Indexing, alerting
+                        and publishing continue.
+                    </CardSub>
+                    <div className="mt-4">
+                        <button onClick={() => location.reload()} style={btn}>Reload</button>
+                    </div>
+                </Card>
+            </main>
+        );
+    }
+}
+
 function App() {
     const [state, setState] = useState<State | undefined>();
     const [busy, setBusy] = useState(false);
     const [testResult, setTestResult] = useState<string | undefined>();
     const [simulation, setSimulation] = useState<Simulation | undefined>();
+    const [fetchError, setFetchError] = useState<string | undefined>();
 
-    const refresh = async () => setState((await (await api("state")).json()) as State);
+    /**
+     * A failed poll never clears the last good state: showing five-second-old
+     * numbers under a warning is more useful than showing nothing, and a blank
+     * panel during a brief blip would be indistinguishable from a dead service.
+     */
+    const refresh = async () => {
+        try {
+            const res = await api("state");
+            if (res.status === 401) {
+                setFetchError("Unauthorized — the ?token in the URL is missing or wrong.");
+                return;
+            }
+            if (!res.ok) {
+                setFetchError(`Service returned ${res.status} ${res.statusText}`);
+                return;
+            }
+            setState((await res.json()) as State);
+            setFetchError(undefined);
+        } catch (e) {
+            setFetchError(`Cannot reach the service: ${e instanceof Error ? e.message : String(e)}`);
+        }
+    };
     useEffect(() => {
         void refresh();
         const t = setInterval(() => void refresh(), 5000);
         return () => clearInterval(t);
     }, []);
 
+    // try/finally throughout: a throw that skipped setBusy(false) would leave
+    // every button on the panel disabled until a manual reload.
     const act = async (path: string) => {
         setBusy(true);
-        await api(path, {method: "POST"});
-        await refresh();
-        setBusy(false);
+        try {
+            await api(path, {method: "POST"});
+            await refresh();
+        } catch (e) {
+            setFetchError(`Request failed: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+            setBusy(false);
+        }
     };
 
     const post = async (path: string, payload: unknown) => {
         setBusy(true);
-        const res = await api(path, {
-            method: "POST",
-            headers: {"content-type": "application/json"},
-            body: JSON.stringify(payload),
-        });
-        const json = (await res.json()) as { ok?: boolean; error?: string; channel?: string };
-        setTestResult(
-            json.ok === false || json.error
-                ? `${json.channel ?? "request"} failed: ${json.error ?? "unknown error"}`
-                : `${json.channel ?? "done"}: sent`,
-        );
-        await refresh();
-        setBusy(false);
+        try {
+            const res = await api(path, {
+                method: "POST",
+                headers: {"content-type": "application/json"},
+                body: JSON.stringify(payload),
+            });
+            const json = (await res.json()) as { ok?: boolean; error?: string; channel?: string };
+            setTestResult(
+                json.ok === false || json.error
+                    ? `${json.channel ?? "request"} failed: ${json.error ?? "unknown error"}`
+                    : `${json.channel ?? "done"}: sent`,
+            );
+            await refresh();
+        } catch (e) {
+            setTestResult(`request failed: ${e instanceof Error ? e.message : String(e)}`);
+        } finally {
+            setBusy(false);
+        }
     };
 
     const simulate = async () => {
         setBusy(true);
         setSimulation(undefined);
-        const res = await api("payout/simulate", {method: "POST"});
-        setSimulation((await res.json()) as Simulation);
-        setBusy(false);
+        try {
+            const res = await api("payout/simulate", {method: "POST"});
+            setSimulation((await res.json()) as Simulation);
+        } catch (e) {
+            setSimulation({
+                built: false,
+                error: e instanceof Error ? e.message : String(e),
+                recipientCount: 0, totalPlanck: "0", feePlanck: "0",
+                requiresOrdinarySend: false,
+            });
+        } finally {
+            setBusy(false);
+        }
     };
 
-    if (!state) return <main className="p-8 text-[var(--muted)]">Loading…</main>;
+    if (!state) {
+        return (
+            <main className="p-8 text-[var(--muted)]">
+                {fetchError ?? "Loading…"}
+            </main>
+        );
+    }
 
     const {status, miners} = state.projection;
     const chain = state.chain;
@@ -213,6 +309,15 @@ function App() {
             >
                 Testnet Rewards — Admin
             </h1>
+
+            {fetchError && (
+                <Card className="mb-4">
+                    <CardLabel>Connection</CardLabel>
+                    <Badge tone="warn">stale</Badge>
+                    <CardSub>{fetchError}</CardSub>
+                    <CardSub>Showing the last values received.</CardSub>
+                </Card>
+            )}
 
             <div className="grid gap-4 md:grid-cols-3">
                 <Card>
@@ -494,4 +599,8 @@ function App() {
 }
 
 const root = document.getElementById("root");
-if (root) createRoot(root).render(<App/>);
+if (root) createRoot(root).render(
+    <ErrorBoundary>
+        <App/>
+    </ErrorBoundary>,
+);
