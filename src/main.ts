@@ -20,6 +20,7 @@ import { buildProjection } from "./publish/projection.ts";
 import { createTursoPublisher } from "./publish/tursoPublisher.ts";
 import { createAdminServer } from "./admin/server.ts";
 import { simulatePayout } from "./payout/simulate.ts";
+import { createPayoutAccountWatcher } from "./payout/payoutAccount.ts";
 import { generateSignKeys } from "@signumjs/crypto";
 import { toChainDay } from "./domain/chainDay.ts";
 import { ChainTime } from "@signumjs/util";
@@ -93,6 +94,21 @@ boot.info(
     ? "payout account configured; payouts simulate against mainnet"
     : "no payout account seed; payout simulation will report it as unconfigured",
 );
+
+// The balance is refreshed a good deal more slowly than the admin panel polls.
+// It changes only when a payout runs or someone tops the account up, so a
+// minute of lag costs nothing, while a lookup per poll would put this service
+// on public mainnet nodes several times a second.
+const payoutAccount = payoutPublicKey
+  ? createPayoutAccountWatcher({
+      publicKey: payoutPublicKey,
+      getAccount: (accountId) => mainnet.getAccount(accountId),
+      ttlSeconds: 60,
+    })
+  : undefined;
+if (payoutAccount) {
+  boot.info("payout account", { account: payoutAccount.get().accountRS });
+}
 const wsMonitor = createWsMonitor(config.chain.testnetWsUrl);
 
 // Fork detection is optional, like publishing: without reference nodes there is
@@ -193,6 +209,7 @@ const adminServer = createAdminServer({
       sendToOne: (args) => mainnet.buildUnsignedSend(args),
     }),
   getForkState: () => forkMonitor?.getState(),
+  getPayoutAccount: payoutAccount && (() => payoutAccount.get()),
 });
 boot.info("admin UI listening", { url: adminServer.url });
 

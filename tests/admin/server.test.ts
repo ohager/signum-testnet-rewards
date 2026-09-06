@@ -393,3 +393,67 @@ describe("admin server routes", () => {
     expect(res.status).toBe(503);
   });
 });
+
+describe("admin server payout account", () => {
+  const view = {
+    accountId: "6502115112683865257",
+    accountRS: "S-9K9L-4CB5-88Y5-F5G4Z",
+    balancePlanck: "123400000000",
+    existsOnChain: true,
+    checkedAt: 1_800_000_000,
+    error: null,
+  };
+
+  const serverWith = (getPayoutAccount?: () => typeof view) =>
+    createAdminServer({
+      db, token: TOKEN, host: "127.0.0.1", port: 0,
+      minPayout: Amount.fromSigna("5"),
+      rails: {
+        maxPerRecipientPerBatch: Amount.fromSigna("200"),
+        maxPerBatch: Amount.fromSigna("2000"),
+        maxPerWallClockDay: Amount.fromSigna("3000"),
+      },
+      globalDailyBudget: Amount.fromSigna("1000"),
+      payoutSchedule: { enabled: false, intervalSeconds: 6 * 3_600, serviceStartedAt: 1_800_000_000 },
+      getHealth: () => undefined,
+      getChainHead: () => undefined,
+      channels: [],
+      getPayoutAccount,
+    });
+
+  test("GET /api/state carries the payout account and its balance", async () => {
+    const s = serverWith(() => view);
+    const body = (await (await fetch(`${s.url}/api/state`, auth)).json()) as {
+      payoutAccount: typeof view;
+    };
+    s.stop();
+
+    expect(body.payoutAccount).toEqual(view);
+  });
+
+  test("reports null rather than omitting the field when no seed is configured", async () => {
+    // The panel distinguishes "no payout account" from "the balance has not
+    // loaded", so an absent key and a null value must not look the same.
+    const s = serverWith(undefined);
+    const body = (await (await fetch(`${s.url}/api/state`, auth)).json()) as Record<string, unknown>;
+    s.stop();
+
+    expect(body).toHaveProperty("payoutAccount");
+    expect(body.payoutAccount).toBeNull();
+  });
+
+  test("reads the account once per state request and never awaits it", async () => {
+    // A blocking lookup here would hold up the whole panel behind a mainnet
+    // node, so the server may only call a function that answers from cache.
+    let calls = 0;
+    const s = serverWith(() => {
+      calls++;
+      return view;
+    });
+
+    await fetch(`${s.url}/api/state`, auth);
+    s.stop();
+
+    expect(calls).toBe(1);
+  });
+});

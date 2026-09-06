@@ -43,6 +43,15 @@ interface HeadBlock {
     observedAt: number;
 }
 
+interface PayoutAccountRow {
+    accountId: string;
+    accountRS: string;
+    balancePlanck: string | null;
+    existsOnChain: boolean | null;
+    checkedAt: number | null;
+    error: string | null;
+}
+
 interface ChannelRow {
     name: string;
     minSeverity: string;
@@ -64,6 +73,8 @@ interface State {
     projection: { status: StatusRow; miners: MinerRow[] };
     channels: ChannelRow[];
     simulationAvailable: boolean;
+    /** Null when PAYOUT_ACCOUNT_SEED is unset: there is no account to report. */
+    payoutAccount: PayoutAccountRow | null;
     chain: {
         head: HeadBlock | null;
         indexed: { height: number; blockId: string; generatorRS: string } | null;
@@ -121,6 +132,94 @@ function AccountId({rs, id}: { rs: string; id: string }) {
         <span>
             {rs} <span style={{color: "var(--muted)", fontSize: "0.85em"}}>({id})</span>
         </span>
+    );
+}
+
+/**
+ * The account the money leaves FROM, and whether it can cover what we are about
+ * to send.
+ *
+ * Two things are deliberately kept apart here. The address is derived locally
+ * from the payout public key, so it is shown unconditionally — "which account
+ * do we pay from" has an answer even with every mainnet node unreachable. The
+ * balance is a mainnet reading and may be missing, ageing or stale, and says so.
+ *
+ * MAINNET, throughout. Every other account on this panel is a testnet forger;
+ * this one is where real SIGNA is spent from, which is why the address is
+ * rendered with its `S-` prefix and labelled.
+ */
+function PayoutAccountCard(
+    {account, dueTotalPlanck, now}: {
+        account: PayoutAccountRow | null;
+        dueTotalPlanck: string;
+        now: number;
+    },
+) {
+    if (!account) {
+        return (
+            <Card>
+                <CardLabel>Payout account</CardLabel>
+                <Badge tone="warn">not configured</Badge>
+                <CardSub>
+                    PAYOUT_ACCOUNT_SEED is unset, so no account is derived and nothing can be
+                    signed.
+                </CardSub>
+            </Card>
+        );
+    }
+
+    const balance = account.balancePlanck === null ? null : BigInt(account.balancePlanck);
+    const due = BigInt(dueTotalPlanck);
+    // Excludes the network fee, so "covers" is a necessary condition and not a
+    // sufficient one. Overstating it would be worse than leaving the fee out.
+    const shortfall = balance !== null && due > 0n && balance < due ? due - balance : null;
+
+    return (
+        <Card>
+            <CardLabel>Payout account — mainnet</CardLabel>
+
+            {balance === null ? (
+                <p className="text-[22px]" style={{fontFamily: "var(--font-display)"}}>
+                    <span style={{color: "var(--muted)"}}>checking…</span>
+                </p>
+            ) : (
+                <p className="text-[26px]" style={{fontFamily: "var(--font-display)"}}>
+                    <SignaAmount planck={String(balance)}/>
+                </p>
+            )}
+
+            <div className="mt-1 flex flex-wrap gap-2">
+                {account.existsOnChain === false && <Badge tone="crit">not on chain</Badge>}
+                {shortfall !== null && <Badge tone="crit">short of next batch</Badge>}
+                {account.error !== null && <Badge tone="warn">balance stale</Badge>}
+            </div>
+
+            <CardSub>
+                <AccountId rs={account.accountRS} id={account.accountId}/>
+            </CardSub>
+
+            {shortfall !== null && (
+                <CardSub>
+                    short by <SignaAmount planck={String(shortfall)}/> of the{" "}
+                    <SignaAmount planck={dueTotalPlanck}/> dry run, before fees
+                </CardSub>
+            )}
+
+            {account.existsOnChain === false && (
+                <CardSub>
+                    mainnet has no such account: it has never received anything, so it holds
+                    nothing and cannot pay
+                </CardSub>
+            )}
+
+            {account.error !== null && <CardSub>last lookup failed: {account.error}</CardSub>}
+
+            <CardSub>
+                {account.checkedAt === null
+                    ? "no successful balance lookup yet"
+                    : `balance read ${relative(account.checkedAt, now)}`}
+            </CardSub>
+        </Card>
     );
 }
 
@@ -463,6 +562,12 @@ function App() {
                         </CardSub>
                     )}
                 </Card>
+
+                <PayoutAccountCard
+                    account={state.payoutAccount}
+                    dueTotalPlanck={state.dryRun.totalPlanck}
+                    now={now}
+                />
             </div>
 
             <div className="mt-6 flex gap-3">

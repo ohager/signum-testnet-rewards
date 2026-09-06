@@ -18,6 +18,7 @@ import { sumBroadcastSinceWallClock } from "../ledger/batches.ts";
 import { isChannelEnabled, setChannelEnabled } from "../ledger/channelState.ts";
 import { simulatePayout } from "../payout/simulate.ts";
 import type { PayoutSimulation } from "../payout/simulate.ts";
+import type { PayoutAccountView } from "../payout/payoutAccount.ts";
 import type { Channel } from "../notify/channel.ts";
 import { describeError, silentLogger } from "../log.ts";
 import type { Logger } from "../log.ts";
@@ -45,6 +46,14 @@ export interface AdminServerDeps {
   simulate?: (report: DryRunReport) => Promise<PayoutSimulation>;
   /** Absent when fork detection is disabled. */
   getForkState?: () => ForkState | undefined;
+  /**
+   * The account payouts are sent FROM, with its mainnet balance.
+   *
+   * Absent when PAYOUT_ACCOUNT_SEED is unset. Must not block: it is read on
+   * every poll of /api/state, so the implementation is expected to answer from
+   * cache and refresh out of band.
+   */
+  getPayoutAccount?: () => PayoutAccountView;
 }
 
 export interface AdminServer {
@@ -213,6 +222,7 @@ export function createAdminServer(deps: AdminServerDeps): AdminServer {
           channels: serialiseChannels(deps.db, deps.channels),
           simulationAvailable: Boolean(deps.simulate),
           fork: serialiseFork(deps.getForkState?.()),
+          payoutAccount: deps.getPayoutAccount?.() ?? null,
           openAlerts: listOpenAlerts(deps.db),
           killSwitchReason: getKillSwitchReason(deps.db) ?? null,
           dryRun: serialiseDryRun(currentDryRun()),
