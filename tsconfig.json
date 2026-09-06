@@ -27,5 +27,10 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+
+  // The Next.js app under web/ is a separate root with its own tsconfig and its
+  // own dependency tree. Without this, `tsc --noEmit` here globs **/* and
+  // type-checks it against `types: ["bun"]`, which it is not written for.
+  "exclude": ["web", "node_modules"]
 }

@@ -9,4 +9,5 @@ chainwalker.cache.json
 .DS_Store
 dist/
 .next/
+*.tsbuildinfo
 data/
