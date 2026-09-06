@@ -24,6 +24,10 @@ import { generateSignKeys } from "@signumjs/crypto";
 import { toChainDay } from "./domain/chainDay.ts";
 import { ChainTime } from "@signumjs/util";
 import { pruneLedger } from "./ledger/retention.ts";
+import {Crypto} from "@signumjs/crypto"
+import {NodeJSCryptoAdapter} from "@signumjs/crypto/adapters";
+
+Crypto.init(new NodeJSCryptoAdapter())
 
 // Config validation runs FIRST and throws before anything opens a database.
 // The volume sentinel check lives inside loadConfig for exactly this reason.
