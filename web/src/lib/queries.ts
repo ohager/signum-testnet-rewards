@@ -1,6 +1,6 @@
 import { turso } from "./turso";
 import { decodeMiner, decodePayout, decodeStatus } from "./readModel";
-import type { Miner, Payout, Row, Status } from "./readModel";
+import type { Row, Snapshot } from "./readModel";
 
 /**
  * Every read the public site performs, with its row cost stated.
@@ -27,12 +27,6 @@ import type { Miner, Payout, Row, Status } from "./readModel";
 
 export const MINER_LIMIT = 25;
 export const PAYOUT_LIMIT = 10;
-
-export interface Snapshot {
-  status: Status;
-  miners: Miner[];
-  payouts: Payout[];
-}
 
 /**
  * Three outcomes, kept distinct on purpose.

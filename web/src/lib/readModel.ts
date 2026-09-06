@@ -176,6 +176,75 @@ export function decodeMiner(row: Row): Miner {
   };
 }
 
+export interface Snapshot {
+  status: Status;
+  miners: Miner[];
+  payouts: Payout[];
+}
+
+/* ── wire format ───────────────────────────────────────────────────────────
+ * What crosses the HTTP boundary to the browser.
+ *
+ * JSON has no bigint, so every planck value travels as a decimal STRING and is
+ * widened back to bigint on arrival. Sending them as numbers would work today
+ * and start silently truncating somewhere north of 90 million SIGNA, which is
+ * exactly the kind of bug that shows up once the programme succeeds.
+ */
+
+type Planckify<T> = {
+  [K in keyof T]: T[K] extends bigint ? string : T[K] extends bigint | null ? string | null : T[K];
+};
+
+export type StatusWire = Planckify<Status>;
+export type MinerWire = Planckify<Miner>;
+export type PayoutWire = Planckify<Payout>;
+
+export interface SnapshotWire {
+  status: StatusWire;
+  miners: MinerWire[];
+  payouts: PayoutWire[];
+}
+
+export function toWire(snapshot: Snapshot): SnapshotWire {
+  return {
+    status: {
+      ...snapshot.status,
+      budgetRemainingPlanck: snapshot.status.budgetRemainingPlanck.toString(),
+      totalDistributedPlanck: snapshot.status.totalDistributedPlanck.toString(),
+      pendingPlanck: snapshot.status.pendingPlanck.toString(),
+    },
+    miners: snapshot.miners.map((m) => ({
+      ...m,
+      pendingPlanck: m.pendingPlanck.toString(),
+      paidPlanck: m.paidPlanck.toString(),
+    })),
+    payouts: snapshot.payouts.map((p) => ({
+      ...p,
+      totalPlanck: p.totalPlanck === null ? null : p.totalPlanck.toString(),
+    })),
+  };
+}
+
+export function fromWire(wire: SnapshotWire): Snapshot {
+  return {
+    status: {
+      ...wire.status,
+      budgetRemainingPlanck: BigInt(wire.status.budgetRemainingPlanck),
+      totalDistributedPlanck: BigInt(wire.status.totalDistributedPlanck),
+      pendingPlanck: BigInt(wire.status.pendingPlanck),
+    },
+    miners: wire.miners.map((m) => ({
+      ...m,
+      pendingPlanck: BigInt(m.pendingPlanck),
+      paidPlanck: BigInt(m.paidPlanck),
+    })),
+    payouts: wire.payouts.map((p) => ({
+      ...p,
+      totalPlanck: p.totalPlanck === null ? null : BigInt(p.totalPlanck),
+    })),
+  };
+}
+
 export function decodePayout(row: Row): Payout {
   return {
     batchId: int(row.batch_id),
