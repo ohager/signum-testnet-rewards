@@ -37,12 +37,14 @@ function buildRules(status: Status): Rule[] {
         "against the account credited with forging it.",
     },
     {
-      title: "Mine solo, not through a pool",
+      title: "Mine solo, against a node of your own",
       body:
-        "The reward is paid to the forger. Forge through a pool and the payment lands on the " +
-        "pool's mainnet account, and a pool has no way to share out mainnet SIGNA it was never " +
-        "designed to receive. Solo mining also means running your own testnet node, which is the " +
-        "point of the exercise.",
+        "Ideally you mine solo and point the miner at a testnet node you run yourself. That is " +
+        "another node carrying the chain, and every miner running one makes the testnet " +
+        "steadier — which is the point of the exercise. A Signum test node is light enough to " +
+        "sit alongside the miner on the same machine. Forge through a pool and you are still " +
+        "credited — the block names you as its forger, whatever the pool does with the testnet " +
+        "reward afterwards.",
     },
     {
       title: "Your mainnet plots already work",
