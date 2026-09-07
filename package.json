@@ -9,7 +9,8 @@
     "dev": "bun --hot src/main.ts",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit",
-    "reset": "bun run src/reset.ts"
+    "reset": "bun run src/reset.ts",
+    "repair": "bun run src/repair.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",
