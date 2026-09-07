@@ -65,15 +65,18 @@ export function Dashboard({
   payoutAccountId,
 }: DashboardProps) {
   /**
-   * Set once a poll has actually come back from the network.
+   * WHEN this browser last had a response in its hands, or null if never.
    *
-   * Until then the snapshot on screen came from HTML of unknowable age, so its
-   * age cannot be measured against the browser clock — that subtraction would
-   * return how long the page sat in the ISR cache. `onSuccess` fires only for a
-   * real fetch, never for `fallbackData`, which is exactly the distinction
-   * needed here.
+   * Until the first one the snapshot on screen came from HTML of unknowable
+   * age, so its age cannot be measured against the browser clock — that
+   * subtraction would return how long the page sat in the ISR cache.
+   * `onSuccess` fires only for a real fetch, never for `fallbackData`, which is
+   * exactly the distinction needed here.
+   *
+   * A moment rather than a boolean because the staleness verdict has to be
+   * fixed to the instant it was taken. See `stale` below.
    */
-  const [verified, setVerified] = useState(false);
+  const [lastObservedAt, setLastObservedAt] = useState<number | null>(null);
 
   /**
    * Polling is off until a person turns it on. See `useAutoUpdate` for why the
@@ -120,7 +123,7 @@ export function Dashboard({
     // the `offline` badge. Blanking the page because one request failed would
     // throw away data that is still perfectly valid, just ageing.
     keepPreviousData: true,
-    onSuccess: () => setVerified(true),
+    onSuccess: () => setLastObservedAt(Math.floor(Date.now() / 1000)),
   });
 
   /**
@@ -147,7 +150,7 @@ export function Dashboard({
    *
    * One request, only on loads that were actually stale — not a poll. It is
    * also what lets the staleness badge speak for a reader who never touches the
-   * controls, since `verified` turns on only for a real response.
+   * controls, since `lastObservedAt` is set only by a real response.
    */
   useEffect(() => {
     const pageAge = Math.floor(Date.now() / 1000) - serverNow;
@@ -181,16 +184,33 @@ export function Dashboard({
   const { status, miners, payouts } = snapshot;
 
   /**
-   * "The service stopped publishing", never "this page was cached a while".
+   * "The service stopped publishing", never "this page was cached a while" and
+   * never "we stopped asking".
    *
-   * Only a snapshot fetched by this browser can be aged against this browser's
-   * clock. Before that, the server's verdict from render time stands — it is
-   * the one comparison made with both halves in the same moment. A poll that
-   * FAILS leaves the old verdict in place rather than flipping this on: that
-   * case is already the `offline` badge's to report, and it says something
-   * different.
+   * Measured against `lastObservedAt` — the moment of the last response — and
+   * NOT against `now`. Both halves then come from the same instant, which is
+   * the same discipline `staleAtRender` exists for on the server side, and it
+   * is what keeps the verdict from drifting after it was taken.
+   *
+   * Using `now` here was wrong in a way that only showed once the page stopped
+   * polling continuously. `updatedAt` advances only when a fetch lands, so a
+   * page that has stopped looking — a backgrounded tab, SWR pausing while
+   * hidden, or auto-update simply off — grows the numerator against a frozen
+   * snapshot and accuses the service of dying at exactly the threshold, having
+   * observed nothing at all. Freezing the verdict costs nothing, because the
+   * timestamp beside the badge goes on ageing off the real clock: a reader can
+   * always see the snapshot is old, and "update now" re-checks whose fault
+   * that is.
+   *
+   * Before the first response the server's verdict from render time stands. A
+   * fetch that FAILS leaves whatever verdict we had in place rather than
+   * flipping this on: that case is already the `offline` badge's to report, and
+   * it says something different.
    */
-  const stale = verified ? now - status.updatedAt > stalenessSeconds : staleAtRender;
+  const stale =
+    lastObservedAt === null
+      ? staleAtRender
+      : lastObservedAt - status.updatedAt > stalenessSeconds;
 
   return (
     <>
