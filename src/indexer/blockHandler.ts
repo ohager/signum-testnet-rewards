@@ -28,13 +28,18 @@ export interface BlockHandlerDeps {
  * that question into a support burden.
  *
  * The early return on an already-recorded block is an optimisation only. The
- * real guarantee against double-accrual is the INSERT OR IGNORE in
+ * real guarantee against double-accrual is the conflict clause in
  * recordBlockReward, which holds even if two handlers race.
+ *
+ * An orphaned row is deliberately NOT treated as recorded: the reorg audit
+ * replays exactly those heights, and the whole point of the replay is to score
+ * the block again against today's caps.
  */
 export function createBlockHandler(deps: BlockHandlerDeps) {
   return async function handleBlock(block: Block): Promise<void> {
     const blockId = block.block;
-    if (getBlockReward(deps.db, blockId)) return;
+    const existing = getBlockReward(deps.db, blockId);
+    if (existing && existing.status !== "orphaned") return;
 
     const chainDay = toChainDay(block.timestamp);
     const generatorId = block.generator;

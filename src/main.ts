@@ -35,6 +35,27 @@ import {NodeJSCryptoAdapter} from "@signumjs/crypto/adapters";
 
 Crypto.init(new NodeJSCryptoAdapter())
 
+/**
+ * Tears down whatever a previous evaluation of this module left running.
+ *
+ * `bun --hot` re-runs this file in the SAME process without unwinding its side
+ * effects, so every reload used to stack another set of timers and monitors on
+ * top of the last. That is not a cosmetic dev annoyance: twelve accumulated
+ * notifier timers all fire in the same tick, all read the same undelivered
+ * alert, and one chain fork arrives as ten emails. globalThis survives the
+ * reload, so the previous run parks its teardown there for this one to call.
+ *
+ * The ledger handle is deliberately NOT closed here. Work started by the old
+ * evaluation may still be in flight, and a closed database turns that into a
+ * crash; the connection is released when the old closure is collected.
+ */
+declare global {
+  // eslint-disable-next-line no-var
+  var __rewardsTeardown: (() => void) | undefined;
+}
+globalThis.__rewardsTeardown?.();
+globalThis.__rewardsTeardown = undefined;
+
 // Config validation runs FIRST and throws before anything opens a database.
 // The volume sentinel check lives inside loadConfig for exactly this reason.
 const config = loadConfig();
@@ -156,6 +177,7 @@ const healthMonitor = createHealthMonitor({
   probe: createHttpProbe(testnet),
   intervalMs: 60_000,
   forkMonitor,
+  log: log.child("health"),
 });
 
 // Publishing is optional: without Turso configured the service still indexes,
@@ -265,6 +287,7 @@ function payoutDue(): boolean {
 const indexer = createIndexer({
   db,
   config,
+  log: log.child("indexer"),
   walkerCachePath: paths.walkerCachePath,
   lookupMainnetAccount,
   isExcluded: () => false,
@@ -369,17 +392,28 @@ const pruneTimer = setInterval(() => {
   log.child("retention").debug("pruned local ledger", { ...dropped });
 }, 6 * 3_600_000);
 
-let shuttingDown = false;
-async function shutdown(signal: string) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  log.child("shutdown").info(signal);
+/** Everything with a timer or a socket behind it. Shared by shutdown and hot reload. */
+function stopBackgroundWork(): void {
   clearInterval(publishTimer);
   clearInterval(notifyTimer);
   clearInterval(pruneTimer);
   healthMonitor.stop();
   forkMonitor?.stop();
   adminServer.stop();
+}
+
+globalThis.__rewardsTeardown = () => {
+  stopBackgroundWork();
+  void indexer.stop();
+};
+
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.child("shutdown").info(signal);
+  globalThis.__rewardsTeardown = undefined;
+  stopBackgroundWork();
   await indexer.stop();
   publisher?.close();
   db.close();

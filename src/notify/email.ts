@@ -1,4 +1,5 @@
 import type { Channel } from "./channel.ts";
+import { CHANNEL_TIMEOUT_MS } from "./channel.ts";
 import type { Severity } from "../ledger/alerts.ts";
 
 export interface EmailChannelConfig {
@@ -28,6 +29,7 @@ export function createEmailChannel(cfg: EmailChannelConfig): Channel {
           authorization: `Bearer ${cfg.resendApiKey}`,
           "content-type": "application/json",
         },
+        signal: AbortSignal.timeout(CHANNEL_TIMEOUT_MS),
         body: JSON.stringify({
           from: cfg.from,
           to: [cfg.to],

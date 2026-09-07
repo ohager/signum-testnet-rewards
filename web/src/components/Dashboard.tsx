@@ -32,6 +32,8 @@ export interface DashboardProps {
   /** The server's clock at render time, so hydration matches. */
   serverNow: number;
   stalenessSeconds: number;
+  /** Numeric id of the mainnet account payouts are sent from, if configured. */
+  payoutAccountId: string | null;
 }
 
 /**
@@ -42,7 +44,12 @@ export interface DashboardProps {
  * ago" above a miner table from ten minutes earlier would be worse than a page
  * that is uniformly a little old.
  */
-export function Dashboard({ initial, serverNow, stalenessSeconds }: DashboardProps) {
+export function Dashboard({
+  initial,
+  serverNow,
+  stalenessSeconds,
+  payoutAccountId,
+}: DashboardProps) {
   const { data, error } = useSWR<StatusResponse>("/api/status", fetcher, {
     fallbackData: initial,
     refreshInterval: REFRESH_MS,
@@ -86,7 +93,7 @@ export function Dashboard({ initial, serverNow, stalenessSeconds }: DashboardPro
       <Headline status={status} now={now} />
       <RewardRules status={status} />
       <MinerTable miners={miners} status={status} now={now} />
-      <PayoutTable payouts={payouts} now={now} />
+      <PayoutTable payouts={payouts} now={now} payoutAccountId={payoutAccountId} />
       <Footnote status={status} now={now} />
     </>
   );
@@ -351,6 +358,10 @@ const SKIP_REASON: Record<string, string> = {
   skipped_no_mainnet_account: "no mainnet account",
   skipped_pubkey_mismatch: "public key mismatch",
   skipped_excluded: "account excluded",
+  // Not a rule the miner broke: the block itself stopped existing when the
+  // chain reorganised, so saying "skipped" without saying why would read as an
+  // accusation.
+  orphaned: "block replaced by a reorg",
 };
 
 const MAINNET_BADGE: Record<Miner["mainnetAccount"], { tone: Tone; text: string }> = {
@@ -445,7 +456,15 @@ function MinerTable({ miners, status, now }: { miners: Miner[]; status: Status; 
   );
 }
 
-function PayoutTable({ payouts, now }: { payouts: Payout[]; now: number }) {
+function PayoutTable({
+  payouts,
+  now,
+  payoutAccountId,
+}: {
+  payouts: Payout[];
+  now: number;
+  payoutAccountId: string | null;
+}) {
   return (
     <Card>
       <CardLabel>Recent payouts</CardLabel>
@@ -481,7 +500,20 @@ function PayoutTable({ payouts, now }: { payouts: Payout[]; now: number }) {
           </table>
         </div>
       )}
-      <CardSub>Last {PAYOUT_LIMIT} confirmed batches.</CardSub>
+      <CardSub>
+        {payouts.length > 0 && `Last ${PAYOUT_LIMIT} confirmed batches. `}
+        {/* The paying account is named here rather than in the footer because
+            this table is the claim it backs: the explorer holds the same
+            batches, going back further than the last few shown, and a visitor
+            who doubts a row can go and check it. */}
+        {payoutAccountId !== null && (
+          <>
+            Payouts are sent from{" "}
+            <ExplorerLink accountId={payoutAccountId} label={payoutAccountId} />, whose full
+            history is public on the mainnet explorer.
+          </>
+        )}
+      </CardSub>
     </Card>
   );
 }

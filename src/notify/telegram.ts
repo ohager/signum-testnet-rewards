@@ -1,4 +1,5 @@
 import type { Channel } from "./channel.ts";
+import { CHANNEL_TIMEOUT_MS } from "./channel.ts";
 import type { Severity } from "../ledger/alerts.ts";
 
 export function createTelegramChannel(
@@ -12,6 +13,7 @@ export function createTelegramChannel(
       const res = await fetch(`https://api.telegram.org/bot${cfg.botToken}/sendMessage`, {
         method: "POST",
         headers: { "content-type": "application/json" },
+        signal: AbortSignal.timeout(CHANNEL_TIMEOUT_MS),
         body: JSON.stringify({
           chat_id: cfg.chatId,
           text: `*${message.title}*\n${message.body}`,

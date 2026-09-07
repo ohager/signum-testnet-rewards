@@ -1,7 +1,13 @@
 import { test, expect, describe, beforeEach } from "bun:test";
 import { openLedger } from "../../src/ledger/db.ts";
 import type { Ledger } from "../../src/ledger/db.ts";
-import { openAlert, listUnnotifiedAlerts } from "../../src/ledger/alerts.ts";
+import {
+  openAlert,
+  listUnnotifiedAlerts,
+  listOpenAlerts,
+  recordNotice,
+  claimAlertForNotification,
+} from "../../src/ledger/alerts.ts";
 import { createNotifier } from "../../src/notify/notifier.ts";
 import type { Channel } from "../../src/notify/channel.ts";
 import type { Logger } from "../../src/log.ts";
@@ -92,6 +98,105 @@ describe("notifier", () => {
     const a = recorder("telegram");
     await createNotifier({ db, channels: [a.channel] }).flush();
     expect(a.sent).toHaveLength(0);
+  });
+});
+
+describe("CONCURRENT DELIVERY: one incident is one notification", () => {
+  /** A channel that hangs until released, so two flushes are genuinely in flight at once. */
+  const slowChannel = (name: string) => {
+    const sent: string[] = [];
+    let release: () => void = () => {};
+    let markStarted: () => void = () => {};
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const channel: Channel = {
+      name,
+      minSeverity: "warning",
+      async send(message) {
+        markStarted();
+        await new Promise<void>((resolve) => { release = resolve; });
+        sent.push(message.title);
+      },
+    };
+    return { sent, started, channel, release: () => release() };
+  };
+
+  test("TEN EMAILS FOR ONE FORK: overlapping flushes deliver an alert once", async () => {
+    // The bug this fixes, exactly as it happened: `bun --hot` left twelve
+    // notifier timers running in one process, they all fired in the same tick,
+    // and every one of them read the same undelivered alert before any had
+    // marked it sent.
+    const slow = slowChannel("email");
+    openAlert(db, { kind: "chain_fork", severity: "critical", message: "forked" });
+
+    const notifiers = Array.from({ length: 12 }, () =>
+      createNotifier({ db, channels: [slow.channel] }),
+    );
+    const flushes = notifiers.map((n) => n.flush());
+    await slow.started;
+    slow.release();
+    await Promise.all(flushes);
+
+    expect(slow.sent).toHaveLength(1);
+    expect(listUnnotifiedAlerts(db)).toHaveLength(0);
+  });
+
+  test("a flush that fires while the previous one is still running is skipped", async () => {
+    const slow = slowChannel("telegram");
+    openAlert(db, { kind: "low_peers", severity: "warning", message: "1 peer" });
+
+    const notifier = createNotifier({ db, channels: [slow.channel] });
+    const first = notifier.flush();
+    await slow.started;
+    await notifier.flush(); // the timer firing again mid-delivery
+    slow.release();
+    await first;
+
+    expect(slow.sent).toHaveLength(1);
+  });
+
+  test("A CRASHED SENDER MUST NOT BURY THE ALERT: the lease expires and it is retried", async () => {
+    // Simulates the process dying between claiming and delivering: the claim is
+    // on the row, nothing was sent, and nobody is coming back to finish it.
+    openAlert(db, { kind: "testnet_stalled", severity: "critical", message: "stuck" });
+    const [alert] = listUnnotifiedAlerts(db);
+    expect(claimAlertForNotification(db, alert!.id, { leaseSeconds: 120 })).toBe(true);
+
+    const a = recorder("telegram");
+    // A later flush, once the lease has aged out.
+    await createNotifier({ db, channels: [a.channel], leaseSeconds: 0 }).flush();
+    expect(a.sent).toHaveLength(1);
+  });
+
+  test("a failed delivery hands the alert straight back rather than holding the lease", async () => {
+    openAlert(db, { kind: "chain_fork", severity: "critical", message: "forked" });
+    const broken = recorder("email", { fails: true });
+    await createNotifier({ db, channels: [broken.channel] }).flush();
+
+    // No waiting out the lease: the very next flush retries.
+    const working = recorder("email");
+    await createNotifier({ db, channels: [working.channel] }).flush();
+    expect(working.sent).toHaveLength(1);
+  });
+});
+
+describe("notices", () => {
+  test("A NOTICE IS DELIVERED ONCE AND IS NEVER AN OPEN INCIDENT", async () => {
+    const a = recorder("telegram");
+    recordNotice(db, {
+      kind: "fork_halt_released",
+      severity: "critical",
+      message: "payouts resumed",
+    });
+
+    await createNotifier({ db, channels: [a.channel] }).flush();
+    expect(a.sent).toEqual(["[CRITICAL] fork_halt_released"]);
+    expect(listOpenAlerts(db)).toHaveLength(0);
+  });
+
+  test("notices of the same kind can recur, unlike open alerts", async () => {
+    recordNotice(db, { kind: "reorg_rolled_back", severity: "warning", message: "first" });
+    recordNotice(db, { kind: "reorg_rolled_back", severity: "warning", message: "second" });
+    expect(listUnnotifiedAlerts(db)).toHaveLength(2);
   });
 });
 

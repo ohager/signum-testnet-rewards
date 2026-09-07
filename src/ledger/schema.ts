@@ -42,7 +42,11 @@ CREATE TABLE IF NOT EXISTS block_rewards (
   status               TEXT    NOT NULL,
   amount_planck        INTEGER NOT NULL DEFAULT 0,
   batch_id             INTEGER REFERENCES batches(id),
-  created_at           INTEGER NOT NULL
+  created_at           INTEGER NOT NULL,
+  -- Set when a reorg replaced this block. The row is KEPT: the status page has
+  -- to be able to explain why an accrual disappeared, and a deleted row can
+  -- explain nothing.
+  orphaned_at          INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_br_acct_day  ON block_rewards(generator_id, chain_day);
 CREATE INDEX IF NOT EXISTS ix_br_day       ON block_rewards(chain_day);
@@ -85,7 +89,11 @@ CREATE TABLE IF NOT EXISTS alerts (
   opened_at         INTEGER NOT NULL,
   resolved_at       INTEGER,
   notified_at       INTEGER,
-  notified_channels TEXT
+  notified_channels TEXT,
+  -- Held by whoever is currently trying to deliver this alert. See
+  -- claimAlertForNotification: read-then-send-then-mark is a race, and losing
+  -- it means the operator gets the same incident once per racing flush.
+  notify_lease_at   INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ix_alert_open ON alerts(kind) WHERE resolved_at IS NULL;
 
@@ -119,4 +127,6 @@ CREATE VIEW IF NOT EXISTS unpaid_accruals AS
  */
 export const ADDED_COLUMNS: { table: string; column: string; ddl: string }[] = [
   { table: "batches", column: "broadcast_host", ddl: "ALTER TABLE batches ADD COLUMN broadcast_host TEXT" },
+  { table: "alerts", column: "notify_lease_at", ddl: "ALTER TABLE alerts ADD COLUMN notify_lease_at INTEGER" },
+  { table: "block_rewards", column: "orphaned_at", ddl: "ALTER TABLE block_rewards ADD COLUMN orphaned_at INTEGER" },
 ];

@@ -8,7 +8,13 @@ import type { WsState } from "../../src/health/wsEvents.ts";
 import type { ProbeResult } from "../../src/health/httpProbe.ts";
 import type { AppConfig } from "../../src/config/schema.ts";
 import type { ForkMonitor, ForkState } from "../../src/health/forkMonitor.ts";
-import { isKillSwitchTripped, getKillSwitchReason } from "../../src/ledger/state.ts";
+import {
+  isKillSwitchTripped,
+  getKillSwitchReason,
+  getChainHalt,
+  setReorgAuditHeight,
+} from "../../src/ledger/state.ts";
+import { listUnnotifiedAlerts, openAlert } from "../../src/ledger/alerts.ts";
 
 let db: Ledger;
 beforeEach(() => { db = openLedger(":memory:"); });
@@ -145,6 +151,83 @@ describe("health monitor", () => {
     );
     for (let i = 0; i < 8; i++) await monitor.tick();
     expect(listOpenAlerts(db).filter((a) => a.kind === "chain_fork")).toHaveLength(1);
+  });
+
+  test("the halt remembers the height it happened at, for the audit to answer later", async () => {
+    const monitor = monitorWith(
+      { ...initialWsState(), lastHeartbeatAtMs: NOW },
+      healthyProbe,
+      stubForkMonitor(forkState("forked", true)),
+    );
+    for (let i = 0; i < 3; i++) await monitor.tick();
+    expect(getChainHalt(db)).toEqual({ height: 990, cause: "fork" });
+  });
+
+  test("A SELF-HEALED FORK RELEASES THE HALT once the audit has been past it", async () => {
+    // The chain reorganised itself back into agreement while we were halted.
+    const forked = monitorWith(
+      { ...initialWsState(), lastHeartbeatAtMs: NOW },
+      healthyProbe,
+      stubForkMonitor(forkState("forked", true)),
+    );
+    for (let i = 0; i < 3; i++) await forked.tick();
+    expect(isKillSwitchTripped(db)).toBe(true);
+
+    // The reorg audit has since verified every block past the fork height.
+    setReorgAuditHeight(db, 990);
+    const agreed = stubForkMonitor(forkState("agreed", true));
+    const recovered = monitorWith({ ...initialWsState(), lastHeartbeatAtMs: NOW }, healthyProbe, agreed);
+    for (let i = 0; i < 4; i++) await recovered.tick();
+
+    expect(isKillSwitchTripped(db)).toBe(false);
+    expect(getChainHalt(db)).toBeUndefined();
+    // Whoever was told the money stopped is told, on the same channel, that it
+    // is moving again.
+    const resumed = listUnnotifiedAlerts(db).find((a) => a.kind === "chain_halt_released");
+    expect(resumed?.severity).toBe("critical");
+  });
+
+  test("AGREEMENT ALONE RELEASES NOTHING: without an audit the halt stands", async () => {
+    const forked = monitorWith(
+      { ...initialWsState(), lastHeartbeatAtMs: NOW },
+      healthyProbe,
+      stubForkMonitor(forkState("forked", true)),
+    );
+    for (let i = 0; i < 3; i++) await forked.tick();
+
+    const agreed = stubForkMonitor(forkState("agreed", true));
+    const recovered = monitorWith({ ...initialWsState(), lastHeartbeatAtMs: NOW }, healthyProbe, agreed);
+    for (let i = 0; i < 6; i++) await recovered.tick();
+
+    expect(isKillSwitchTripped(db)).toBe(true);
+  });
+
+  test("A PAID ORPHAN OUTLIVES THE HEALTH LOOP: the halt holds for as long as it is open", async () => {
+    // What actually happened in production: this loop closed an incident it had
+    // not raised, which unblocked the release rule and lifted a halt built to
+    // require a human — three minutes after it tripped.
+    const forked = monitorWith(
+      { ...initialWsState(), lastHeartbeatAtMs: NOW },
+      healthyProbe,
+      stubForkMonitor(forkState("forked", true)),
+    );
+    for (let i = 0; i < 3; i++) await forked.tick();
+    openAlert(db, {
+      kind: "reorg_paid_accrual",
+      severity: "critical",
+      message: "9 SIGNA already released for blocks that are gone",
+    });
+    setReorgAuditHeight(db, 990);
+
+    const recovered = monitorWith(
+      { ...initialWsState(), lastHeartbeatAtMs: NOW },
+      healthyProbe,
+      stubForkMonitor(forkState("agreed", true)),
+    );
+    for (let i = 0; i < 10; i++) await recovered.tick();
+
+    expect(isKillSwitchTripped(db)).toBe(true);
+    expect(listOpenAlerts(db).map((a) => a.kind)).toContain("reorg_paid_accrual");
   });
 
   test("references disagreeing warns but never touches the money", async () => {

@@ -58,8 +58,21 @@ export function createForkMonitor(deps: ForkMonitorDeps): ForkMonitor {
   const now = deps.now ?? Date.now;
   let state: ForkState | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
+  // A round talks to several nodes and can outlast the interval on a slow one.
+  // Two rounds in flight would each record an observation and each bump the
+  // streak, turning one piece of evidence into two — which is precisely what
+  // confirmRounds exists to prevent.
+  let inFlight: Promise<ForkState> | undefined;
 
   async function check(): Promise<ForkState> {
+    if (inFlight) return inFlight;
+    inFlight = round().finally(() => {
+      inFlight = undefined;
+    });
+    return inFlight;
+  }
+
+  async function round(): Promise<ForkState> {
     const localHeight = await attempt(() => deps.local.getHeadHeight());
     const referenceHeights = await Promise.all(
       deps.references.map(async (probe) => ({
@@ -121,11 +134,16 @@ export function createForkMonitor(deps: ForkMonitorDeps): ForkMonitor {
 
   return {
     start() {
+      // Idempotent: a second start would leave the first interval running with
+      // nothing holding a handle to it, and every round it fired would be
+      // another duplicate observation nobody could stop.
+      if (timer) return;
       void check();
       timer = setInterval(() => void check(), deps.intervalMs);
     },
     stop() {
       if (timer) clearInterval(timer);
+      timer = undefined;
     },
     getState: () => state,
     check,

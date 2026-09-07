@@ -1,4 +1,5 @@
 import type { Channel } from "./channel.ts";
+import { CHANNEL_TIMEOUT_MS } from "./channel.ts";
 import type { Severity } from "../ledger/alerts.ts";
 
 export function createDiscordChannel(
@@ -12,6 +13,7 @@ export function createDiscordChannel(
       const res = await fetch(cfg.webhookUrl, {
         method: "POST",
         headers: { "content-type": "application/json" },
+        signal: AbortSignal.timeout(CHANNEL_TIMEOUT_MS),
         body: JSON.stringify({ content: `**${message.title}**\n${message.body}` }),
       });
       if (!res.ok) throw new Error(`Discord responded ${res.status}`);

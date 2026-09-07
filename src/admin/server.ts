@@ -13,8 +13,9 @@ import type { PayoutScheduleOptions } from "../publish/projection.ts";
 import { dryRunBatch } from "../payout/dryRun.ts";
 import type { DryRunReport } from "../payout/dryRun.ts";
 import { toChainDay } from "../domain/chainDay.ts";
-import { listOpenAlerts } from "../ledger/alerts.ts";
+import { listOpenAlerts, resolveAlert } from "../ledger/alerts.ts";
 import { setPayoutsPaused, clearKillSwitch, getKillSwitchReason } from "../ledger/state.ts";
+import { HALT_INCIDENTS } from "../health/chainHalt.ts";
 import { sumBroadcastSinceWallClock, liveBatch } from "../ledger/batches.ts";
 import { isChannelEnabled, setChannelEnabled } from "../ledger/channelState.ts";
 import { simulatePayout } from "../payout/simulate.ts";
@@ -346,6 +347,11 @@ export function createAdminServer(deps: AdminServerDeps): AdminServer {
 
       "/api/kill-switch/clear": postOnly(() => {
         clearKillSwitch(deps.db);
+        // Clearing the switch IS the review these incidents were waiting for.
+        // Left open they would sit on the status page for ever and, worse,
+        // block the next one: ix_alert_open allows only one open alert per
+        // kind, so an unresolved incident silences its own successor.
+        for (const kind of HALT_INCIDENTS) resolveAlert(deps.db, kind);
         return json({ ok: true });
       }),
     },

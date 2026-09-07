@@ -11,6 +11,12 @@ export type ChainDay = string;
 
 export type BlockRewardStatus =
   | "accrued"
+  /**
+   * A reorg replaced this block. The row survives with its amount intact so the
+   * history stays readable, but it is no longer accrued: it counts towards
+   * nothing, and it can never be paid.
+   */
+  | "orphaned"
   | "skipped_no_mainnet_account"
   | "skipped_pubkey_mismatch"
   | "skipped_excluded"
