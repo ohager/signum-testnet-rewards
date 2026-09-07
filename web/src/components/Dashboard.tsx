@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import useSWR from "swr";
 import { fromWire } from "@/lib/readModel";
 import type { Miner, Payout, Snapshot, Status } from "@/lib/readModel";
@@ -8,6 +8,7 @@ import type { StatusResponse } from "@/app/api/status/route";
 import { MINER_LIMIT, PAYOUT_LIMIT } from "@/lib/queries";
 import { absoluteTime, countdown, formatSigna, relativeTime, shortId } from "@/lib/format";
 import { useNow } from "@/hooks/useNow";
+import { useAutoUpdate } from "@/hooks/useAutoUpdate";
 import { Card, CardLabel, CardSub } from "@/components/Card";
 import { Badge } from "@/components/Badge";
 import type { Tone } from "@/components/Badge";
@@ -20,7 +21,7 @@ import { TESTNET_EXPLORER, mainnetAddressUrl } from "@/lib/explorer";
  *
  * The publisher heartbeats its status row every 60s, so polling faster cannot
  * surface a newer `updatedAt` — it would only re-read the CDN. This is also the
- * clock the staleness badge waits on: the first poll is what turns an
+ * clock the staleness badge waits on: the first fetch is what turns an
  * unverifiable age into a verified one, so it should be prompt, and after that
  * there is nothing to hurry for.
  */
@@ -74,16 +75,84 @@ export function Dashboard({
    */
   const [verified, setVerified] = useState(false);
 
-  const { data, error } = useSWR<StatusResponse>("/api/status", fetcher, {
+  /**
+   * Polling is off until a person turns it on. See `useAutoUpdate` for why the
+   * default is off; what it means HERE is that every revalidation trigger below
+   * is gated on it, so a page nobody asked to keep current makes exactly one
+   * request: the one that delivered it.
+   */
+  const [autoUpdate, setAutoUpdate] = useAutoUpdate();
+
+  const { data, error, isValidating, mutate } = useSWR<StatusResponse>("/api/status", fetcher, {
     fallbackData: initial,
-    refreshInterval: REFRESH_MS,
-    revalidateOnFocus: true,
+    // Zero is SWR's "do not poll".
+    refreshInterval: autoUpdate ? REFRESH_MS : 0,
+    revalidateOnFocus: autoUpdate,
+    /**
+     * Focus revalidation is throttled to the poll interval, not SWR's 5s
+     * default.
+     *
+     * The snapshot cannot change faster than the publisher writes it, so a
+     * reader alt-tabbing between windows was spending a request every five
+     * seconds to be told the same thing.
+     */
+    focusThrottleInterval: REFRESH_MS,
+    /**
+     * SWR would otherwise fetch on mount regardless, which with polling opt-in
+     * would make "off" cost a request on every page load — precisely what the
+     * switch exists to prevent. The effect below decides that question with
+     * more information than SWR has: whether this HTML was actually fresh.
+     */
+    revalidateOnMount: false,
+    /**
+     * A failed poll is retried by the next poll, and by nothing else.
+     *
+     * SWR's default answers an error with its own escalating retries — roughly
+     * 5s, then 10s, then 20s, with no limit — which is the wrong reflex when
+     * the failure is an edge rate limit. Those retries are more of exactly what
+     * tripped it, so the endpoint never gets the quiet it is asking for and the
+     * page stays offline long after it could have recovered. `refreshInterval`
+     * already reattempts every 60s, and a recovery cannot usefully be noticed
+     * sooner than that.
+     */
+    shouldRetryOnError: false,
     // A failed poll keeps the last good snapshot on screen and is reported by
     // the `offline` badge. Blanking the page because one request failed would
     // throw away data that is still perfectly valid, just ageing.
     keepPreviousData: true,
     onSuccess: () => setVerified(true),
   });
+
+  /**
+   * The two cases that warrant a fetch without anyone asking for one.
+   *
+   * FIRST: auto-update becoming active — the click that enables it, and load
+   * for a reader whose stored preference already said yes. `refreshInterval`
+   * alone would leave a full minute between asking the page to go live and it
+   * doing anything, and a switch that appears to do nothing is a switch people
+   * press twice.
+   *
+   * SECOND, and this one is not about polling at all: HTML that was served from
+   * cache older than the window meant to bound it. `revalidate` is
+   * stale-while-revalidate, so a quiet page can be handed out for as long as it
+   * takes the next visitor to trigger a rebuild — observed at 23 minutes, still
+   * announcing a "degraded" service that had recovered 22 minutes earlier. That
+   * is not a page going slightly out of date, it is a page making a false
+   * claim, and it must not depend on the reader having opted into anything.
+   *
+   * `now - serverNow` is THIS PAGE's age, which is a different quantity from
+   * the snapshot's age and the only one measurable without a fetch. Keeping
+   * them apart is the same discipline `staleAtRender` exists for: our lateness
+   * is ours to fix quietly, never the service's to be blamed for.
+   *
+   * One request, only on loads that were actually stale — not a poll. It is
+   * also what lets the staleness badge speak for a reader who never touches the
+   * controls, since `verified` turns on only for a real response.
+   */
+  useEffect(() => {
+    const pageAge = Math.floor(Date.now() / 1000) - serverNow;
+    if (autoUpdate || pageAge > REFRESH_MS / 1000) void mutate();
+  }, [autoUpdate, mutate, serverNow]);
 
   const now = useNow(serverNow);
   const result = newerOf(data, initial);
@@ -125,7 +194,16 @@ export function Dashboard({
 
   return (
     <>
-      <ServiceBanner status={status} stale={stale} offline={Boolean(error)} now={now} />
+      <ServiceBanner
+        status={status}
+        stale={stale}
+        offline={Boolean(error)}
+        now={now}
+        autoUpdate={autoUpdate}
+        onAutoUpdateChange={setAutoUpdate}
+        onRefresh={() => void mutate()}
+        refreshing={isValidating}
+      />
       <Headline status={status} now={now} />
       <RewardRules status={status} />
       <MinerTable miners={miners} status={status} now={now} />
@@ -170,11 +248,19 @@ function ServiceBanner({
   stale,
   offline,
   now,
+  autoUpdate,
+  onAutoUpdateChange,
+  onRefresh,
+  refreshing,
 }: {
   status: Status;
   stale: boolean;
   offline: boolean;
   now: number;
+  autoUpdate: boolean;
+  onAutoUpdateChange: (on: boolean) => void;
+  onRefresh: () => void;
+  refreshing: boolean;
 }) {
   return (
     <Card>
@@ -196,12 +282,75 @@ function ServiceBanner({
           </time>{" "}
           · {absoluteTime(status.updatedAt)}
         </span>
+        <UpdateControl
+          autoUpdate={autoUpdate}
+          onAutoUpdateChange={onAutoUpdateChange}
+          onRefresh={onRefresh}
+          refreshing={refreshing}
+        />
       </div>
       <ChainHead status={status} now={now} />
       {status.openAlerts.length > 0 && (
         <CardSub>Open alerts: {status.openAlerts.join(", ").replace(/_/g, " ")}</CardSub>
       )}
     </Card>
+  );
+}
+
+/**
+ * The reader's control over how this page stays current.
+ *
+ * Two separate affordances because they answer two different questions. "Update
+ * now" is for somebody who wants to know whether something just changed and
+ * will then go back to reading; the switch is for somebody leaving this open.
+ * Collapsing them into one would force the second person's cost on the first.
+ *
+ * Styled as the badges are, and sitting with them, because it belongs to the
+ * same row of claims about freshness — it is the line that says whether the
+ * timestamp beside it will move on its own.
+ */
+function UpdateControl({
+  autoUpdate,
+  onAutoUpdateChange,
+  onRefresh,
+  refreshing,
+}: {
+  autoUpdate: boolean;
+  onAutoUpdateChange: (on: boolean) => void;
+  onRefresh: () => void;
+  refreshing: boolean;
+}) {
+  const chip =
+    "inline-block px-2 py-0.5 text-[9px] font-semibold uppercase tracking-[2px] cursor-pointer transition-colors disabled:cursor-default disabled:opacity-60";
+
+  return (
+    <div className="flex items-center gap-2">
+      <button
+        type="button"
+        onClick={onRefresh}
+        disabled={refreshing}
+        className={chip}
+        style={{ color: "var(--blue2)", border: "1px solid var(--blue2)" }}
+      >
+        {refreshing ? "updating" : "update now"}
+      </button>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={autoUpdate}
+        // Static name, state carried by aria-checked: a switch whose accessible
+        // name flips with it is announced as a different control each time.
+        aria-label="Auto-update"
+        onClick={() => onAutoUpdateChange(!autoUpdate)}
+        className={chip}
+        style={{
+          color: autoUpdate ? "var(--green)" : "var(--muted)",
+          border: `1px solid ${autoUpdate ? "var(--green)" : "var(--muted)"}`,
+        }}
+      >
+        auto {autoUpdate ? "on" : "off"}
+      </button>
+    </div>
   );
 }
 
@@ -587,8 +736,9 @@ function Footnote({ status, now }: { status: Status; now: number }) {
         .
       </p>
       <p className="mt-1">
-        This page is a snapshot published by the rewards service, refreshed every 60 seconds. The
-        service&apos;s own ledger is authoritative.
+        This page is a snapshot published by the rewards service every 60 seconds. It does not
+        follow along on its own unless you switch auto-update on, above. The service&apos;s own
+        ledger is authoritative.
       </p>
     </footer>
   );
