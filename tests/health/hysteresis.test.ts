@@ -66,3 +66,37 @@ describe("applyHysteresis", () => {
     expect(before.size).toBe(0);
   });
 });
+
+describe("alerts this loop does not own", () => {
+  test("A FOREIGN INCIDENT IS NEVER CLOSED HERE, however long it sits open", () => {
+    // The real failure: an orphaned accrual that had already been paid opened a
+    // critical alert, and this loop — seeing an open kind with no matching
+    // condition — closed it three ticks later. That released a halt built to
+    // require a human.
+    let counters = emptyCounters();
+    const open = new Set(["reorg_paid_accrual", "payout_failed"]);
+    for (let tick = 0; tick < 10; tick++) {
+      const result = applyHysteresis(counters, [], open, {
+        openAfterChecks: 3,
+        closeAfterChecks: 3,
+      });
+      counters = result.counters;
+      expect(result.toResolve).toEqual([]);
+    }
+  });
+
+  test("its own conditions still resolve normally alongside one", () => {
+    let counters = emptyCounters();
+    const open = new Set(["low_peers", "reorg_paid_accrual"]);
+    let resolved: string[] = [];
+    for (let tick = 0; tick < 3; tick++) {
+      const result = applyHysteresis(counters, [], open, {
+        openAfterChecks: 3,
+        closeAfterChecks: 3,
+      });
+      counters = result.counters;
+      resolved = result.toResolve;
+    }
+    expect(resolved).toEqual(["low_peers"]);
+  });
+});

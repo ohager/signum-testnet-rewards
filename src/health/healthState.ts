@@ -17,6 +17,30 @@ export type HealthAlertKind =
  * more often than fork checks run, so it must be able to tell a fresh, repeated
  * verdict from a single stale one it happens to be looking at again.
  */
+/**
+ * The alert kinds this module raises, and therefore the only ones it may close.
+ *
+ * Stated as a value, not just a type, because the hysteresis loop has to decide
+ * at runtime whether an open alert is one of its own. Everything else in the
+ * alerts table belongs to whoever raised it: the payout runner's failures, the
+ * reorg auditor's paid-orphan incident. Closing those on the strength of "the
+ * chain looks fine to me" is how a halt that needed a human lifted itself in
+ * three minutes.
+ */
+export const HEALTH_ALERT_KINDS: readonly HealthAlertKind[] = [
+  "node_unreachable",
+  "testnet_stalled",
+  "ws_degraded",
+  "node_out_of_sync",
+  "low_peers",
+  "chain_fork",
+  "reference_nodes_disagree",
+];
+
+export function isHealthAlertKind(kind: string): kind is HealthAlertKind {
+  return (HEALTH_ALERT_KINDS as readonly string[]).includes(kind);
+}
+
 export interface ForkObservation {
   verdict: ForkVerdict;
   confirmed: boolean;
