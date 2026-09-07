@@ -15,10 +15,16 @@ import type { Row, Snapshot } from "./readModel";
  *   ────────────────
  *            36 rows
  *
- * At `revalidate = 60` that is at most 1440 renders/day → ~1.6M rows/month,
- * comfortably inside the tier with room for traffic spikes to be absorbed by
- * the cache rather than by the database. Raising the limits or lowering the
- * revalidate window both scale this linearly — do the arithmetic before either.
+ * Two windows decide how often that happens, and neither of them is the number
+ * of viewers: the page regenerates at most once per 60s (`revalidate`) and the
+ * API route is fetched from origin at most once per 60s (its `s-maxage`). Each
+ * generated result is then shared by everyone arriving inside its window. That
+ * is 2880 reads/day → ~3.1M rows/month at a ceiling that only a continuously
+ * busy site reaches, against a 5M tier. `cachedSnapshot` sits underneath both
+ * and collapses them further when they land on the same instance together.
+ *
+ * Raising the limits or shortening either window scales this linearly — do the
+ * arithmetic before touching any of the three.
  *
  * The counts NEVER come from `COUNT(*)`: a count scans the rows it counts, so
  * it would cost the whole table to render one number. `status.miner_count` is
@@ -87,4 +93,46 @@ export async function readSnapshot(): Promise<SnapshotResult> {
       payouts: (payoutsResult?.rows ?? []).map((r) => decodePayout(r as unknown as Row)),
     },
   };
+}
+
+/**
+ * How long ONE database read is reused for, across every request the process
+ * serves. Matches the publisher's 30s tick: a shorter window would re-read rows
+ * that cannot have changed.
+ */
+const SNAPSHOT_TTL_MS = 30_000;
+
+let memo: { readAt: number; result: Promise<SnapshotResult> } | null = null;
+
+/**
+ * `readSnapshot`, but at most once per {@link SNAPSHOT_TTL_MS} per instance.
+ *
+ * This is what lets both the page and the API route render WITHOUT being served
+ * from a cache that may be arbitrarily old. Next's `revalidate` is
+ * stale-while-revalidate: past the window it hands the visitor the previous
+ * body and regenerates behind them, so on a low-traffic site the first paint
+ * could be hours old — which is exactly what the "snapshot stale" badge was
+ * reporting, correctly, until the first poll replaced it.
+ *
+ * Here the age is BOUNDED instead: a read older than the window is awaited, not
+ * skipped over. The row cost stays flat in traffic because it is the clock that
+ * decides when to read, not the number of viewers — the property the read-model
+ * exists to protect.
+ *
+ * The promise is memoised, not the value, so concurrent requests arriving on a
+ * cold cache share one round trip rather than starting one each. A rejected
+ * read evicts itself: a failure is a moment, and caching it for 30s would turn
+ * one bad round trip into 30 seconds of error page.
+ */
+export function cachedSnapshot(): Promise<SnapshotResult> {
+  const now = Date.now();
+  if (memo && now - memo.readAt < SNAPSHOT_TTL_MS) return memo.result;
+
+  const result = readSnapshot();
+  const entry = { readAt: now, result };
+  memo = entry;
+  result.catch(() => {
+    if (memo === entry) memo = null;
+  });
+  return result;
 }

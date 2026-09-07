@@ -1,4 +1,4 @@
-import { readSnapshot } from "@/lib/queries";
+import { cachedSnapshot } from "@/lib/queries";
 import { toWire } from "@/lib/readModel";
 import { Dashboard } from "@/components/Dashboard";
 import type { StatusResponse } from "@/app/api/status/route";
@@ -6,15 +6,31 @@ import type { StatusResponse } from "@/app/api/status/route";
 /**
  * Seconds between rebuilds of the server-rendered shell.
  *
- * The live numbers come from SWR polling /api/status, so this only governs how
- * fresh the FIRST paint is for a visitor arriving cold. It stays at 60 rather
- * than dropping to the API's 30 because a page-level revalidation re-renders
- * everything, while the API route re-reads one cached JSON body.
+ * ISR is kept for the property it is good at: the request that finds the window
+ * lapsed generates the page, and every visitor arriving inside that window is
+ * served that same result. One database read fans out to all of them.
+ *
+ * What it does NOT give is a bound on age. `revalidate` is
+ * stale-while-revalidate, so past the window Next serves the previous HTML and
+ * rebuilds behind the request — on a quiet page that HTML can be hours old.
+ * That is fine for the numbers, which the client corrects on its first poll,
+ * but it must never drive the "snapshot stale" badge: see `staleAtRender`.
  */
 export const revalidate = 60;
 
+/**
+ * How old the published snapshot may be before the page says so.
+ *
+ * Four missed heartbeats. The service rewrites its status row at least every
+ * 60s even when nothing changed, so this measures the publisher's liveness, not
+ * the chain's — a testnet that forges nothing for an hour still heartbeats, and
+ * this badge would be wrong to fire on it.
+ *
+ * One heartbeat above the service's own 180s threshold on purpose: the operator
+ * is alerted before the public is told.
+ */
 const STALENESS_SECONDS = Number(
-  process.env.NEXT_PUBLIC_STALENESS_SECONDS ?? 300,
+  process.env.NEXT_PUBLIC_STALENESS_SECONDS ?? 240,
 );
 
 /**
@@ -35,19 +51,40 @@ const PAYOUT_ACCOUNT_ID = process.env.NEXT_PUBLIC_PAYOUT_ACCOUNT_ID?.trim() || n
  *
  * Doing the first read here rather than letting the browser fetch it means the
  * page has its numbers in the HTML: no loading spinner, no layout shift, and
- * the content is present for anything that does not run JavaScript.
+ * the content is present for anything that does not run JavaScript. Because the
+ * read is bounded rather than cached indefinitely, those numbers are current on
+ * arrival — the poll that follows keeps them so, it no longer has to fix them.
  */
 export default async function Page() {
-  const result = await readSnapshot();
+  const result = await cachedSnapshot();
   const initial: StatusResponse =
     result.kind === "ok"
       ? { kind: "ok", snapshot: toWire(result.snapshot) }
       : result;
 
+  const serverNow = Math.floor(Date.now() / 1000);
+
+  /**
+   * Whether the snapshot was late AT THE MOMENT THIS HTML WAS BUILT.
+   *
+   * This is the only staleness claim the server can honestly make. Comparing
+   * the snapshot against the visitor's clock instead would measure how long
+   * this HTML sat in the ISR cache — our own lateness, not the service's — and
+   * that is precisely the false accusation the badge used to make on every cold
+   * load.
+   *
+   * It is computed here rather than skipped because a visitor without
+   * JavaScript never gets a poll to correct it, and they deserve to be told
+   * when the service that produced these numbers had actually stopped.
+   */
+  const staleAtRender =
+    result.kind === "ok" && serverNow - result.snapshot.status.updatedAt > STALENESS_SECONDS;
+
   return (
     <Dashboard
       initial={initial}
-      serverNow={Math.floor(Date.now() / 1000)}
+      serverNow={serverNow}
+      staleAtRender={staleAtRender}
       stalenessSeconds={STALENESS_SECONDS}
       payoutAccountId={PAYOUT_ACCOUNT_ID}
     />

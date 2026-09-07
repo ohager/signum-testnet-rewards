@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import useSWR from "swr";
 import { fromWire } from "@/lib/readModel";
 import type { Miner, Payout, Snapshot, Status } from "@/lib/readModel";
@@ -15,10 +16,15 @@ import { RewardRules } from "@/components/RewardRules";
 import { TESTNET_EXPLORER, mainnetAddressUrl } from "@/lib/explorer";
 
 /**
- * Matches the publisher's tick and the API route's cache window. Polling faster
- * cannot surface anything newer — it would only re-read the CDN.
+ * Matches the API route's cache window, and twice the publisher's tick.
+ *
+ * The publisher heartbeats its status row every 60s, so polling faster cannot
+ * surface a newer `updatedAt` — it would only re-read the CDN. This is also the
+ * clock the staleness badge waits on: the first poll is what turns an
+ * unverifiable age into a verified one, so it should be prompt, and after that
+ * there is nothing to hurry for.
  */
-const REFRESH_MS = 30_000;
+const REFRESH_MS = 60_000;
 
 const fetcher = async (url: string): Promise<StatusResponse> => {
   const res = await fetch(url);
@@ -31,6 +37,12 @@ export interface DashboardProps {
   initial: StatusResponse;
   /** The server's clock at render time, so hydration matches. */
   serverNow: number;
+  /**
+   * Whether the snapshot was already late when this HTML was generated — the
+   * server's honest reading, unaffected by how long the HTML then sat in the
+   * ISR cache. Used until the first poll can measure the age for real.
+   */
+  staleAtRender: boolean;
   stalenessSeconds: number;
   /** Numeric id of the mainnet account payouts are sent from, if configured. */
   payoutAccountId: string | null;
@@ -47,9 +59,21 @@ export interface DashboardProps {
 export function Dashboard({
   initial,
   serverNow,
+  staleAtRender,
   stalenessSeconds,
   payoutAccountId,
 }: DashboardProps) {
+  /**
+   * Set once a poll has actually come back from the network.
+   *
+   * Until then the snapshot on screen came from HTML of unknowable age, so its
+   * age cannot be measured against the browser clock — that subtraction would
+   * return how long the page sat in the ISR cache. `onSuccess` fires only for a
+   * real fetch, never for `fallbackData`, which is exactly the distinction
+   * needed here.
+   */
+  const [verified, setVerified] = useState(false);
+
   const { data, error } = useSWR<StatusResponse>("/api/status", fetcher, {
     fallbackData: initial,
     refreshInterval: REFRESH_MS,
@@ -58,10 +82,11 @@ export function Dashboard({
     // the `offline` badge. Blanking the page because one request failed would
     // throw away data that is still perfectly valid, just ageing.
     keepPreviousData: true,
+    onSuccess: () => setVerified(true),
   });
 
   const now = useNow(serverNow);
-  const result = data ?? initial;
+  const result = newerOf(data, initial);
 
   if (result.kind !== "ok") {
     return (
@@ -85,7 +110,18 @@ export function Dashboard({
 
   const snapshot: Snapshot = fromWire(result.snapshot);
   const { status, miners, payouts } = snapshot;
-  const stale = now - status.updatedAt > stalenessSeconds;
+
+  /**
+   * "The service stopped publishing", never "this page was cached a while".
+   *
+   * Only a snapshot fetched by this browser can be aged against this browser's
+   * clock. Before that, the server's verdict from render time stands — it is
+   * the one comparison made with both halves in the same moment. A poll that
+   * FAILS leaves the old verdict in place rather than flipping this on: that
+   * case is already the `offline` badge's to report, and it says something
+   * different.
+   */
+  const stale = verified ? now - status.updatedAt > stalenessSeconds : staleAtRender;
 
   return (
     <>
@@ -97,6 +133,27 @@ export function Dashboard({
       <Footnote status={status} now={now} />
     </>
   );
+}
+
+/**
+ * Whichever of the two snapshots was published later.
+ *
+ * A poll can legitimately return something OLDER than the page was rendered
+ * with: the page is ISR-cached, the API route sits behind its own 60s CDN
+ * window, and those two clocks are not aligned. Taking the
+ * response unconditionally would let the first poll walk "published 10s ago"
+ * backwards to "published a minute ago", which reads as the page losing ground
+ * rather than gaining it. Publish time is monotonic at the source, so trusting
+ * it is enough to make this display monotonic too.
+ *
+ * Only `ok` responses can be compared. An `empty` or `unconfigured` reply is
+ * the current truth about the deployment and always wins — the service having
+ * been reset is exactly the case where the old numbers are the wrong answer.
+ */
+function newerOf(data: StatusResponse | undefined, initial: StatusResponse): StatusResponse {
+  if (!data) return initial;
+  if (data.kind !== "ok" || initial.kind !== "ok") return data;
+  return data.snapshot.status.updatedAt >= initial.snapshot.status.updatedAt ? data : initial;
 }
 
 /**
@@ -530,7 +587,7 @@ function Footnote({ status, now }: { status: Status; now: number }) {
         .
       </p>
       <p className="mt-1">
-        This page is a snapshot published by the rewards service, refreshed every 30 seconds. The
+        This page is a snapshot published by the rewards service, refreshed every 60 seconds. The
         service&apos;s own ledger is authoritative.
       </p>
     </footer>
