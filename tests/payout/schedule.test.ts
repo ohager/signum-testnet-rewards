@@ -13,6 +13,7 @@ const input = (over: Partial<PayoutScheduleInput> = {}): PayoutScheduleInput => 
   serviceStartedAt: NOW - 5 * HOUR,
   intervalSeconds: 6 * HOUR,
   nowEpochSeconds: NOW,
+  hasPayableRecipient: true,
   ...over,
 });
 
@@ -20,7 +21,7 @@ describe("computePayoutSchedule", () => {
   test("schedules one interval after the last batch", () => {
     const s = computePayoutSchedule(input());
     expect(s.nextRunAt).toBe(NOW - HOUR + 6 * HOUR);
-    expect(s.due).toBe(false);
+    expect(s.state).toBe("pending");
     expect(s.blockedBy).toBeUndefined();
   });
 
@@ -33,20 +34,20 @@ describe("computePayoutSchedule", () => {
   test("A MISSED WINDOW IS DUE, NOT ROLLED FORWARD", () => {
     const s = computePayoutSchedule(input({ lastRunAt: NOW - 30 * HOUR }));
     expect(s.nextRunAt).toBe(NOW - 24 * HOUR);
-    expect(s.due).toBe(true);
+    expect(s.state).toBe("due");
   });
 
   test("the exact boundary counts as due", () => {
     const s = computePayoutSchedule(input({ lastRunAt: NOW - 6 * HOUR }));
     expect(s.nextRunAt).toBe(NOW);
-    expect(s.due).toBe(true);
+    expect(s.state).toBe("due");
   });
 
   test("NO TIME IS SHOWN WHEN PAYOUTS ARE DISABLED", () => {
     const s = computePayoutSchedule(input({ enabled: false }));
     expect(s.nextRunAt).toBeUndefined();
     expect(s.blockedBy).toBe("disabled");
-    expect(s.due).toBe(false);
+    expect(s.state).toBe("blocked");
   });
 
   test("a tripped kill switch blocks the schedule", () => {
@@ -70,5 +71,33 @@ describe("computePayoutSchedule", () => {
   test("the last run is still reported while blocked", () => {
     const s = computePayoutSchedule(input({ enabled: false }));
     expect(s.lastRunAt).toBe(NOW - HOUR);
+  });
+
+  describe("when nothing clears the minimum payout", () => {
+    const overdueWithDust = (over: Partial<PayoutScheduleInput> = {}) =>
+      computePayoutSchedule(
+        input({ lastRunAt: NOW - 30 * HOUR, hasPayableRecipient: false, ...over }),
+      );
+
+    test("AN OVERDUE CYCLE IS POSTPONED, NOT DUE", () => {
+      expect(overdueWithDust().state).toBe("postponed");
+    });
+
+    test("the elapsed time is still reported, so the wait stays visible", () => {
+      expect(overdueWithDust().nextRunAt).toBe(NOW - 24 * HOUR);
+    });
+
+    test("postponement is not a blocker: nothing needs an operator", () => {
+      expect(overdueWithDust().blockedBy).toBeUndefined();
+    });
+
+    test("a cycle that has not elapsed is pending, not postponed", () => {
+      const s = computePayoutSchedule(input({ hasPayableRecipient: false }));
+      expect(s.state).toBe("pending");
+    });
+
+    test("an operator blocker still outranks postponement", () => {
+      expect(overdueWithDust({ paused: true }).state).toBe("blocked");
+    });
   });
 });

@@ -92,14 +92,25 @@ function buildRules(status: Status): Rule[] {
         "and nothing accrues.",
     },
     {
+      // The threshold is a floor on YOUR balance, not on the size of the batch.
+      // Phrased as a batch minimum it reads as though small payouts are skipped
+      // entirely, when what actually happens is that your own accruals keep
+      // adding up until they qualify.
       title:
         minPayout === null
-          ? "Settled in batches"
-          : `Settled in batches of at least ${formatSignaPlain(minPayout)} SIGNA`,
+          ? "Paid out in batches"
+          : `Paid once your balance reaches ${formatSignaPlain(minPayout)} SIGNA`,
       body:
-        `Each cycle pays the oldest accruals first, up to ${MAX_RECIPIENTS_PER_TX} recipients per ` +
-        "transaction. A balance under the minimum, or beyond that limit, simply waits for the " +
-        "next cycle — nothing is lost.",
+        minPayout === null
+          ? "Rewards accrue to your account and are settled in cycles, oldest first. A single " +
+            `transaction carries at most ${MAX_RECIPIENTS_PER_TX} recipients, so anyone beyond ` +
+            "that waits for a later cycle — nothing is lost, and nothing expires."
+          : "The minimum is per account, not per payout: your own accruals have to add up to " +
+            `${formatSignaPlain(minPayout)} SIGNA before you are included, however much the ` +
+            "programme pays out that cycle. Each cycle settles the oldest accruals first, and a " +
+            `single transaction carries at most ${MAX_RECIPIENTS_PER_TX} recipients. A balance ` +
+            "below the minimum, or beyond that limit, waits for a later cycle — nothing is " +
+            "lost, and nothing expires.",
     },
   ];
 }

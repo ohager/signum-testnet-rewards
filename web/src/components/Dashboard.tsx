@@ -6,7 +6,9 @@ import { fromWire } from "@/lib/readModel";
 import type { Miner, Payout, Snapshot, Status } from "@/lib/readModel";
 import type { StatusResponse } from "@/app/api/status/route";
 import { MINER_LIMIT, PAYOUT_LIMIT } from "@/lib/queries";
-import { absoluteTime, countdown, formatSigna, relativeTime, shortId } from "@/lib/format";
+import {
+  absoluteTime, countdown, formatSigna, formatSignaPlain, relativeTime, shortId,
+} from "@/lib/format";
 import { useNow } from "@/hooks/useNow";
 import { useAutoUpdate } from "@/hooks/useAutoUpdate";
 import { Card, CardLabel, CardSub } from "@/components/Card";
@@ -523,6 +525,11 @@ const BLOCKER_TEXT: Record<NonNullable<Status["payoutBlockedBy"]>, string> = {
  * the service, so this shows exactly one of them and never invents a date for a
  * cycle that will not run.
  *
+ * A `postponed` cycle is the third case, and it is deliberately NOT a countdown:
+ * its window has already passed, and what it now waits on is a balance reaching
+ * the minimum, which no clock predicts. Showing "due now" there would promise a
+ * payment that cannot happen, and showing a past time would look broken.
+ *
  * The wait is rendered as "in 5h 38m" rather than the rounded "in 6 hours" used
  * elsewhere on the page: this is the one figure a miner is actually waiting on,
  * and it reads as a schedule at the same precision the operator panel shows.
@@ -559,10 +566,29 @@ function NextPayout({ status, now }: { status: Status; now: number }) {
       </>
     );
   }
+  if (status.payoutState === "postponed") {
+    return (
+      <>
+        {/* Calm, not amber: rolling over on a quiet day is the design working,
+            not a fault an operator or a miner has to do anything about. */}
+        <p className="text-lg" style={{ color: "var(--blue3)" }}>
+          waiting for the minimum
+        </p>
+        <CardSub>
+          {status.minPayoutPlanck === null
+            ? "no balance has reached the minimum payout yet"
+            : `no balance has reached ${formatSignaPlain(status.minPayoutPlanck)} SIGNA yet`}
+        </CardSub>
+        {lastRun}
+      </>
+    );
+  }
+
+  const due = status.payoutState === "due";
   return (
     <>
-      <p className="text-lg" style={{ color: status.payoutDue ? "var(--amber)" : "var(--blue3)" }}>
-        {status.payoutDue ? "due now" : countdown(status.nextPayoutAt, now)}
+      <p className="text-lg" style={{ color: due ? "var(--amber)" : "var(--blue3)" }}>
+        {due ? "due now" : countdown(status.nextPayoutAt, now)}
       </p>
       <CardSub>{absoluteTime(status.nextPayoutAt)}</CardSub>
       {lastRun}

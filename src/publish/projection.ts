@@ -1,16 +1,15 @@
-import type { Amount } from "@signumjs/util";
-import { ChainTime } from "@signumjs/util";
+import { Amount, ChainTime } from "@signumjs/util";
 import type { Ledger } from "../ledger/db.ts";
 import type { BlockRewardStatus, ChainDay } from "../domain/types.ts";
 import { toPlanckInt } from "../domain/money.ts";
 import { sumAccruedGlobalOnDay } from "../ledger/blockRewards.ts";
-import { listRecentBatches } from "../ledger/batches.ts";
+import { listRecentBatches, hasPayableRecipient } from "../ledger/batches.ts";
 import { listOpenAlerts } from "../ledger/alerts.ts";
 import { isPayoutsPaused, isKillSwitchTripped } from "../ledger/state.ts";
 import { toReedSolomon } from "../domain/address.ts";
 import { lastBatchCreatedAt } from "../ledger/batches.ts";
 import { computePayoutSchedule } from "../payout/schedule.ts";
-import type { PayoutBlocker } from "../payout/schedule.ts";
+import type { PayoutBlocker, PayoutState } from "../payout/schedule.ts";
 import type { RewardPolicyConfig } from "../domain/policy.ts";
 
 const planckOrNull = (amount: Amount | undefined): number | null =>
@@ -116,8 +115,12 @@ export interface StatusRow {
   nextPayoutAt: number | null;
   /** Set only when there is no next payout: why not. */
   payoutBlockedBy: PayoutBlocker | null;
-  /** The next payout is already overdue. */
-  payoutDue: boolean;
+  /**
+   * Where the cycle stands. `postponed` is the one that needs saying out loud:
+   * the window has passed but nobody clears the minimum payout, so the cycle is
+   * waiting on a balance rather than on the clock.
+   */
+  payoutState: PayoutState;
   lastPayoutAt: number | null;
   openAlerts: string[];
 }
@@ -250,6 +253,9 @@ export function buildProjection(db: Ledger, opts: ProjectionOptions): Projection
     serviceStartedAt: opts.payouts.serviceStartedAt,
     intervalSeconds: opts.payouts.intervalSeconds,
     nowEpochSeconds: opts.nowEpochSeconds,
+    // No configured minimum means no floor to fall short of, so any outstanding
+    // accrual at all counts as payable.
+    hasPayableRecipient: hasPayableRecipient(db, opts.minPayout ?? Amount.Zero()),
   });
 
   // Clamped at zero because the remainder can go negative when an operator
@@ -295,7 +301,7 @@ export function buildProjection(db: Ledger, opts: ProjectionOptions): Projection
       minerCount: miners.length,
       nextPayoutAt: schedule.nextRunAt ?? null,
       payoutBlockedBy: schedule.blockedBy ?? null,
-      payoutDue: schedule.due,
+      payoutState: schedule.state,
       lastPayoutAt: schedule.lastRunAt ?? null,
       openAlerts: listOpenAlerts(db).map((a) => a.kind),
     },

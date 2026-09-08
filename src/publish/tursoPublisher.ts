@@ -138,7 +138,7 @@ export function createTursoPublisher(cfg: PublisherConfig): Publisher {
                                     last_forger_rs, last_block_forged_at,
                                     total_distributed_planck, pending_planck, miner_count,
                                     next_payout_at,
-                                    payout_blocked_by, payout_due, last_payout_at, open_alerts)
+                                    payout_blocked_by, payout_state, last_payout_at, open_alerts)
                 VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                   updated_at               = excluded.updated_at,
@@ -161,7 +161,7 @@ export function createTursoPublisher(cfg: PublisherConfig): Publisher {
                   miner_count              = excluded.miner_count,
                   next_payout_at           = excluded.next_payout_at,
                   payout_blocked_by        = excluded.payout_blocked_by,
-                  payout_due               = excluded.payout_due,
+                  payout_state             = excluded.payout_state,
                   last_payout_at           = excluded.last_payout_at,
                   open_alerts              = excluded.open_alerts`,
           args: [
@@ -185,7 +185,7 @@ export function createTursoPublisher(cfg: PublisherConfig): Publisher {
             projection.status.minerCount,
             projection.status.nextPayoutAt,
             projection.status.payoutBlockedBy,
-            projection.status.payoutDue ? 1 : 0,
+            projection.status.payoutState,
             projection.status.lastPayoutAt,
             JSON.stringify(projection.status.openAlerts),
           ],

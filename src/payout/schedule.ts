@@ -5,12 +5,27 @@
  */
 export type PayoutBlocker = "disabled" | "paused" | "kill_switch";
 
+/**
+ * Where the payout cycle stands, as one value rather than a set of flags.
+ *
+ *  blocked    an operator or the configuration is holding payouts. No time is
+ *             shown, because none is meaningful.
+ *  pending    the interval has not elapsed yet. Counts down to `nextRunAt`.
+ *  due        the interval has elapsed AND someone is actually payable.
+ *  postponed  the interval has elapsed but nobody clears the minimum payout, so
+ *             the accruals roll over and the cycle waits.
+ *
+ * `due` and `postponed` are separate states, not a boolean plus a caveat: a
+ * cycle that cannot produce a batch must never be reported as due, because
+ * "due now" reads as money already on its way.
+ */
+export type PayoutState = "blocked" | "pending" | "due" | "postponed";
+
 export interface PayoutSchedule {
   /** Epoch seconds of the next run. Undefined exactly when `blockedBy` is set. */
   nextRunAt: number | undefined;
   blockedBy: PayoutBlocker | undefined;
-  /** The next run is already in the past — the cycle is due rather than pending. */
-  due: boolean;
+  state: PayoutState;
   /** When the last batch was claimed, if any. */
   lastRunAt: number | undefined;
 }
@@ -25,6 +40,14 @@ export interface PayoutScheduleInput {
   serviceStartedAt: number;
   intervalSeconds: number;
   nowEpochSeconds: number;
+  /**
+   * Whether at least one recipient's unpaid total reaches the minimum payout.
+   *
+   * The minimum is a PER-RECIPIENT floor, so this is not "is anything owed":
+   * ten miners holding a fifth of the minimum each are collectively owed twice
+   * it and still produce no batch.
+   */
+  hasPayableRecipient: boolean;
 }
 
 /**
@@ -36,9 +59,15 @@ export interface PayoutScheduleInput {
  * batch the anchor is service start, so a fresh deployment shows a real time
  * instead of "never".
  *
- * A missed window is reported as `due`, not rolled forward to the next slot. If
- * the service was down over several intervals, the honest statement is that a
+ * A missed window is reported as elapsed, not rolled forward to the next slot.
+ * If the service was down over several intervals, the honest statement is that a
  * payout is overdue — silently advancing the clock would hide that.
+ *
+ * An elapsed window only becomes `due` when someone is payable. Without that
+ * check the panel would sit on "due now" forever: a cycle with nothing above the
+ * minimum creates no batch, so the anchor never advances and the time never
+ * moves. `postponed` says the same thing truthfully — the accruals roll over and
+ * the cycle runs as soon as a balance reaches the minimum.
  *
  * Blocker precedence is config, then kill switch, then pause: `disabled` means
  * no runner exists at all, which makes the other two moot, and an operator
@@ -50,7 +79,7 @@ export function computePayoutSchedule(input: PayoutScheduleInput): PayoutSchedul
   const blocked = (blockedBy: PayoutBlocker): PayoutSchedule => ({
     nextRunAt: undefined,
     blockedBy,
-    due: false,
+    state: "blocked",
     lastRunAt,
   });
 
@@ -60,11 +89,12 @@ export function computePayoutSchedule(input: PayoutScheduleInput): PayoutSchedul
 
   const anchor = lastRunAt ?? input.serviceStartedAt;
   const nextRunAt = anchor + input.intervalSeconds;
+  const elapsed = nextRunAt <= input.nowEpochSeconds;
 
   return {
     nextRunAt,
     blockedBy: undefined,
-    due: nextRunAt <= input.nowEpochSeconds,
+    state: !elapsed ? "pending" : input.hasPayableRecipient ? "due" : "postponed",
     lastRunAt,
   };
 }

@@ -25,7 +25,7 @@ import { createPayoutRunner } from "./payout/runner.ts";
 import { openAlert } from "./ledger/alerts.ts";
 import { computePayoutSchedule } from "./payout/schedule.ts";
 import { isPayoutsPaused, isKillSwitchTripped } from "./ledger/state.ts";
-import { lastBatchCreatedAt } from "./ledger/batches.ts";
+import { lastBatchCreatedAt, hasPayableRecipient } from "./ledger/batches.ts";
 import { generateSignKeys } from "@signumjs/crypto";
 import { toChainDay } from "./domain/chainDay.ts";
 import { ChainTime } from "@signumjs/util";
@@ -271,7 +271,14 @@ function onChainTick(): void {
   })();
 }
 
-/** Whether the schedule says a cycle is owed, using the same clock as the panel. */
+/**
+ * Whether a cycle is owed AND can actually produce a batch, using the same clock
+ * and the same rule as the panel.
+ *
+ * The runner's own gate would refuse an empty batch anyway, so this spares a
+ * pointless pass on every block of a quiet day — and, more importantly, keeps
+ * "due" meaning the same thing here as it does on screen.
+ */
 function payoutDue(): boolean {
   return computePayoutSchedule({
     enabled: config.payouts.enabled,
@@ -281,7 +288,8 @@ function payoutDue(): boolean {
     serviceStartedAt,
     intervalSeconds: config.payouts.intervalMinutes * 60,
     nowEpochSeconds: Math.floor(Date.now() / 1000),
-  }).due;
+    hasPayableRecipient: hasPayableRecipient(db, config.minPayout),
+  }).state === "due";
 }
 
 const indexer = createIndexer({

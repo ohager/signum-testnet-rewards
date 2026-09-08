@@ -27,6 +27,11 @@ export type MainnetAccountState = "active" | "inactive" | "unknown";
 /** Why there is no next payout. Mirrors `PayoutBlocker` in the service. */
 export type PayoutBlocker = "disabled" | "paused" | "kill_switch";
 
+/** Where the payout cycle stands. Mirrors `PayoutState` in the service. */
+export type PayoutState = "blocked" | "pending" | "due" | "postponed";
+
+const PAYOUT_STATES: readonly PayoutState[] = ["blocked", "pending", "due", "postponed"];
+
 export interface Status {
   /** Epoch seconds of the last publish. The site's staleness signal. */
   updatedAt: number;
@@ -74,7 +79,13 @@ export interface Status {
   /** Epoch seconds. Null exactly when `payoutBlockedBy` is set. */
   nextPayoutAt: number | null;
   payoutBlockedBy: PayoutBlocker | null;
-  payoutDue: boolean;
+  /**
+   * `postponed` means the cycle's window has passed but no miner's balance
+   * reaches the minimum payout, so it waits on a balance rather than the clock.
+   * Distinct from `due` on purpose: a cycle that cannot pay anyone must not be
+   * announced as one that is about to.
+   */
+  payoutState: PayoutState;
   lastPayoutAt: number | null;
   openAlerts: string[];
 }
@@ -130,7 +141,7 @@ export const READ_MODEL_COLUMNS = {
     "miner_count",
     "next_payout_at",
     "payout_blocked_by",
-    "payout_due",
+    "payout_state",
     "last_payout_at",
     "open_alerts",
   ],
@@ -162,6 +173,15 @@ const nullablePlanck = (v: unknown): bigint | null =>
 const bool = (v: unknown): boolean => int(v) === 1;
 const str = (v: unknown): string | null => (v === null || v === undefined ? null : String(v));
 
+/**
+ * Falls back to `pending` on anything unrecognised, which shows a countdown
+ * rather than a claim about money. The alternative defaults both assert
+ * something: `due` says a payout is imminent and `blocked` says the programme
+ * has stopped, and neither should be inferred from a value we cannot read.
+ */
+const payoutState = (v: unknown): PayoutState =>
+  PAYOUT_STATES.find((s) => s === v) ?? "pending";
+
 /** A single libSQL result row, keyed by column name. */
 export type Row = Record<string, unknown>;
 
@@ -187,7 +207,7 @@ export function decodeStatus(row: Row): Status {
     minerCount: int(row.miner_count),
     nextPayoutAt: nullableInt(row.next_payout_at),
     payoutBlockedBy: (str(row.payout_blocked_by) as PayoutBlocker | null) ?? null,
-    payoutDue: bool(row.payout_due),
+    payoutState: payoutState(row.payout_state),
     lastPayoutAt: nullableInt(row.last_payout_at),
     openAlerts: parseAlerts(row.open_alerts),
   };

@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS status (
   miner_count              INTEGER NOT NULL DEFAULT 0,
   next_payout_at           INTEGER,
   payout_blocked_by        TEXT,
-  payout_due               INTEGER NOT NULL DEFAULT 0,
+  payout_state             TEXT    NOT NULL DEFAULT 'pending',
   last_payout_at           INTEGER,
   open_alerts              TEXT    NOT NULL DEFAULT '[]'
 );

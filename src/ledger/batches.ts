@@ -1,7 +1,7 @@
 import type { Amount } from "@signumjs/util";
 import type { Ledger } from "./db.ts";
 import type { RecipientAmount } from "../domain/types.ts";
-import { fromPlanckInt } from "../domain/money.ts";
+import { fromPlanckInt, toPlanckInt } from "../domain/money.ts";
 
 /**
  * A batch's life, in order.
@@ -89,6 +89,32 @@ export function aggregateUnpaidByRecipient(db: Ledger): UnpaidAggregate[] {
     accrualCount: r.accrualCount,
     oldestCreatedAt: r.oldestCreatedAt,
   }));
+}
+
+/**
+ * Whether any single recipient is owed at least `minPayout`.
+ *
+ * The question `composeBatch` answers by filtering, asked cheaply enough to sit
+ * on the schedule: without it the panel reports a cycle as due whenever the
+ * interval has elapsed, including cycles that can only produce an empty batch.
+ *
+ * `>=` and the GROUP BY both mirror `composeBatch` exactly — it defers on
+ * `amount.less(minPayout)`, so a balance OF the minimum is payable, and it
+ * groups by generator. A mismatch either way would have the panel and the runner
+ * disagreeing about whether money is about to move.
+ */
+export function hasPayableRecipient(db: Ledger, minPayout: Amount): boolean {
+  const row = db
+    .query(
+      `SELECT 1 AS payable
+         FROM unpaid_accruals
+        GROUP BY generator_id
+       HAVING SUM(amount_planck) >= ?1
+        LIMIT 1`,
+    )
+    .get(toPlanckInt(minPayout));
+
+  return row !== null && row !== undefined;
 }
 
 /**

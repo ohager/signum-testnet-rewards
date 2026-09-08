@@ -27,7 +27,7 @@ const projection = (over: Partial<Projection> = {}): Projection => ({
     minerCount: 1,
     nextPayoutAt: NOW + 3_600,
     payoutBlockedBy: null,
-    payoutDue: false,
+    payoutState: "pending",
     lastPayoutAt: NOW - 3_600,
     openAlerts: [],
   },

@@ -31,7 +31,7 @@ interface StatusRow {
     pendingPlanck: number;
     nextPayoutAt: number | null;
     payoutBlockedBy: string | null;
-    payoutDue: boolean;
+    payoutState: "blocked" | "pending" | "due" | "postponed";
     lastPayoutAt: number | null;
     totalDistributedPlanck: number;
 }
@@ -444,10 +444,22 @@ function App() {
                                 {BLOCKED_LABEL[status.payoutBlockedBy ?? ""] ?? "not scheduled"}
                             </CardSub>
                         </>
+                    ) : status.payoutState === "postponed" ? (
+                        /* The window has passed but nothing clears the minimum, so
+                           the cycle waits on a balance rather than the clock. Showing
+                           the elapsed time here would read as an overdue payment. */
+                        <>
+                            <p className="text-[22px]" style={{fontFamily: "var(--font-display)"}}>
+                                waiting for the minimum
+                            </p>
+                            <CardSub>due since {stamp(status.nextPayoutAt)}</CardSub>
+                        </>
                     ) : (
                         <>
                             <p className="text-[22px]" style={{fontFamily: "var(--font-display)"}}>
-                                {status.payoutDue ? "due now" : relative(status.nextPayoutAt, now)}
+                                {status.payoutState === "due"
+                                    ? "due now"
+                                    : relative(status.nextPayoutAt, now)}
                             </p>
                             <CardSub>{stamp(status.nextPayoutAt)}</CardSub>
                         </>

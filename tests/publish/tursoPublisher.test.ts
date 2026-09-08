@@ -90,7 +90,7 @@ const projection = (over: Partial<Projection> = {}): Projection => ({
     minerCount: 1,
     nextPayoutAt: 1_800_021_600,
     payoutBlockedBy: null,
-    payoutDue: false,
+    payoutState: "pending",
     lastPayoutAt: 1_799_996_400,
     openAlerts: [],
   },
@@ -194,7 +194,7 @@ describe("a remote created by an older build", () => {
     const row = await statusRow();
     expect(row.next_payout_at).toBe(1_800_021_600);
     expect(row.pending_planck).toBe(750_000_000);
-    expect(row.payout_due).toBe(0);
+    expect(row.payout_state).toBe("pending");
   });
 
   test("keeps rows written before the columns existed", async () => {
@@ -306,10 +306,22 @@ describe("the published payout schedule", () => {
 
   test("an overdue payout is published as due", async () => {
     const overdue = projection();
-    overdue.status.payoutDue = true;
+    overdue.status.payoutState = "due";
     await publisher.publish(overdue);
 
-    expect((await statusRow()).payout_due).toBe(1);
+    expect((await statusRow()).payout_state).toBe("due");
+  });
+
+  test("AN OVERDUE CYCLE WITH ONLY DUST PUBLISHES AS POSTPONED, NOT DUE", async () => {
+    const postponed = projection();
+    postponed.status.payoutState = "postponed";
+    await publisher.publish(postponed);
+
+    const row = await statusRow();
+    expect(row.payout_state).toBe("postponed");
+    // The elapsed time still travels: the page shows how long the wait has run,
+    // it just does not call it a countdown.
+    expect(row.next_payout_at).toBe(1_800_021_600);
   });
 });
 

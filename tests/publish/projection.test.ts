@@ -284,6 +284,56 @@ describe("payout schedule in the projection", () => {
   });
 });
 
+describe("an overdue cycle that cannot pay anyone", () => {
+  // The window elapsed a day ago. Whether that reads as "due" now depends
+  // entirely on whether anyone clears the minimum.
+  const overdue = {
+    ...opts,
+    payouts: { ...payouts, serviceStartedAt: opts.nowEpochSeconds - 30 * 3_600 },
+    minPayout: Amount.fromSigna("5"),
+  };
+
+  test("is due when a miner clears the minimum", () => {
+    accrue("b1", "acct-1", "5");
+    expect(buildProjection(db, overdue).status.payoutState).toBe("due");
+  });
+
+  test("IS POSTPONED, NOT DUE, WHEN EVERY BALANCE IS DUST", () => {
+    accrue("b1", "acct-1", "4");
+    accrue("b2", "acct-2", "4");
+    expect(buildProjection(db, overdue).status.payoutState).toBe("postponed");
+  });
+
+  test("stays postponed however much is owed in total", () => {
+    // 40 SIGNA outstanding, eight times the minimum, and not one payable miner.
+    for (let i = 0; i < 10; i++) accrue(`b${i}`, `acct-${i}`, "4");
+
+    const status = buildProjection(db, overdue).status;
+    expect(status.pendingPlanck).toBe(4_000_000_000);
+    expect(status.payoutState).toBe("postponed");
+  });
+
+  test("the elapsed time is still published while postponed", () => {
+    accrue("b1", "acct-1", "4");
+
+    const status = buildProjection(db, overdue).status;
+    expect(status.nextPayoutAt).toBe(opts.nowEpochSeconds - 24 * 3_600);
+    expect(status.payoutBlockedBy).toBeNull();
+  });
+
+  test("a cycle whose window has not elapsed is pending, dust or not", () => {
+    accrue("b1", "acct-1", "4");
+    expect(buildProjection(db, { ...opts, minPayout: Amount.fromSigna("5") }).status.payoutState)
+      .toBe("pending");
+  });
+
+  test("WITH NO MINIMUM CONFIGURED, ANY OUTSTANDING ACCRUAL IS PAYABLE", () => {
+    accrue("b1", "acct-1", "0.1");
+    expect(buildProjection(db, { ...overdue, minPayout: undefined }).status.payoutState)
+      .toBe("due");
+  });
+});
+
 describe("the published miner window", () => {
   // Every row published to Turso is read again on every uncached page view, so
   // the published projection is windowed while the admin panel stays complete.

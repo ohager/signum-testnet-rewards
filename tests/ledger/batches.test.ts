@@ -5,6 +5,7 @@ import type { Ledger } from "../../src/ledger/db.ts";
 import { recordBlockReward } from "../../src/ledger/blockRewards.ts";
 import {
   aggregateUnpaidByRecipient,
+  hasPayableRecipient,
   claimBatch,
   releaseBatch,
   getBatch,
@@ -33,6 +34,53 @@ const accrue = (blockId: string, generatorId: string, signa: string) =>
     status: "accrued",
     amount: Amount.fromSigna(signa),
   });
+
+describe("hasPayableRecipient", () => {
+  const min = Amount.fromSigna("5");
+
+  test("is false when nothing has accrued at all", () => {
+    expect(hasPayableRecipient(db, min)).toBe(false);
+  });
+
+  test("THE MINIMUM IS PER RECIPIENT, NOT ACROSS ALL OF THEM", () => {
+    // Four miners owed 2.5 each is 10 SIGNA outstanding and still no batch:
+    // every one of them is dust on their own.
+    accrue("b1", "acct-1", "2.5");
+    accrue("b2", "acct-2", "2.5");
+    accrue("b3", "acct-3", "2.5");
+    accrue("b4", "acct-4", "2.5");
+    expect(hasPayableRecipient(db, min)).toBe(false);
+  });
+
+  test("sums a recipient's accruals to reach the minimum", () => {
+    accrue("b1", "acct-1", "2.5");
+    expect(hasPayableRecipient(db, min)).toBe(false);
+    accrue("b2", "acct-1", "2.5");
+    expect(hasPayableRecipient(db, min)).toBe(true);
+  });
+
+  test("EXACTLY THE MINIMUM IS PAYABLE, MATCHING composeBatch", () => {
+    accrue("b1", "acct-1", "5");
+    expect(hasPayableRecipient(db, min)).toBe(true);
+  });
+
+  test("one planck under the minimum is not", () => {
+    accrue("b1", "acct-1", "4.99999999");
+    expect(hasPayableRecipient(db, min)).toBe(false);
+  });
+
+  test("ignores accruals already claimed by a batch", () => {
+    accrue("b1", "acct-1", "6");
+    claimBatch(db, { recipientIds: ["acct-1"], deadlineAt: 1 });
+    expect(hasPayableRecipient(db, min)).toBe(false);
+  });
+
+  test("a single payable recipient is enough among dust", () => {
+    accrue("b1", "acct-1", "0.5");
+    accrue("b2", "acct-2", "9");
+    expect(hasPayableRecipient(db, min)).toBe(true);
+  });
+});
 
 describe("aggregateUnpaidByRecipient", () => {
   test("sums unpaid accruals per recipient", () => {
